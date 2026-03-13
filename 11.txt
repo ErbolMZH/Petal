@@ -1,0 +1,17 @@
+SELECT 
+    TO_CHAR(deleted_date, 'YYYY-MM') AS month,
+    COUNT(*) AS deleted_count,
+    COUNT(*) FILTER (WHERE categories = '{}' OR categories IS NULL)    AS empty_count,
+    COUNT(*) FILTER (WHERE 'VICTIM' = ANY(categories))                 AS victim_count,
+    COUNT(*) FILTER (WHERE 'WITNESS' = ANY(categories))                AS witness_count,
+    COUNT(*) 
+        + COUNT(*) FILTER (WHERE categories = '{}' OR categories IS NULL)
+        + COUNT(*) FILTER (WHERE 'VICTIM' = ANY(categories))
+        + COUNT(*) FILTER (WHERE 'WITNESS' = ANY(categories))          AS total
+FROM subject
+WHERE is_deleted = 'true'
+  AND deleted_date IS NOT NULL
+  AND deleted_date BETWEEN '2025-01-01' AND CURRENT_DATE
+  and s."subjectType"='ORGANIZATION'
+GROUP BY TO_CHAR(deleted_date, 'YYYY-MM')
+ORDER BY month;
