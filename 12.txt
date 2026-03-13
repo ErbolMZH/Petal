@@ -1,0 +1,88 @@
+query := `
+SELECT 
+    TO_CHAR(COALESCE(s.deleted_date, s.dt_upd), 'YYYY-MM') AS month,
+
+    COUNT(*) FILTER (WHERE s.deleted_date IS NOT NULL) AS deleted_old,
+
+    COUNT(*) FILTER (
+        WHERE s.categories = '{}' OR s.categories IS NULL
+    ) AS empty_count,
+
+    COUNT(*) FILTER (
+        WHERE 'VICTIM' = ANY(s.categories)
+    ) AS victim_count,
+
+    COUNT(*) FILTER (
+        WHERE 'WITNESS' = ANY(s.categories)
+    ) AS witness_count,
+
+    (
+        COUNT(*) FILTER (WHERE s.deleted_date IS NOT NULL)
+        + COUNT(*) FILTER (WHERE s.categories = '{}' OR s.categories IS NULL)
+        + COUNT(*) FILTER (WHERE 'VICTIM' = ANY(s.categories))
+        + COUNT(*) FILTER (WHERE 'WITNESS' = ANY(s.categories))
+    ) AS total
+
+FROM subject s
+
+WHERE
+(
+    s.deleted_date BETWEEN $1 AND $2
+    OR
+    (
+        s.dt_upd BETWEEN $1 AND $2
+        AND (
+            s.categories = '{}'
+            OR 'VICTIM' = ANY(s.categories)
+            OR 'WITNESS' = ANY(s.categories)
+        )
+    )
+)
+
+AND ($3 = 'ALL' OR s."subjectType" = $3)
+
+GROUP BY TO_CHAR(COALESCE(s.deleted_date, s.dt_upd), 'YYYY-MM')
+ORDER BY month;
+`
+
+
+------------------------------------
+
+func GetSubjectReport(startDate, endDate, subjectType string) ([]SubjectReport, error) {
+
+	var report []SubjectReport
+
+	err := pg.DB().Select(&report, query, startDate, endDate, subjectType)
+	if err != nil {
+		return nil, err
+	}
+
+	return report, nil
+}
+
+------------------------------------------------
+func AFSubjectReport(c echo.Context) error {
+
+	start := c.QueryParam("start_date")
+	end := c.QueryParam("end_date")
+	subjectType := c.QueryParam("type")
+
+	if subjectType == "" {
+		subjectType = "ALL"
+	}
+
+	data, err := model.GetSubjectReport(start, end, subjectType)
+	if err != nil {
+		return c.JSON(500, map[string]interface{}{
+			"status": false,
+			"error":  err.Error(),
+		})
+	}
+
+	return c.JSON(200, map[string]interface{}{
+		"status": true,
+		"data":   data,
+	})
+}
+
+-----------------------------------------------
