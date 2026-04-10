@@ -1,0 +1,101 @@
+const SubjectStatsView = {
+    mixins: [MixinLocale],
+    template: `
+    <div class="container mattblock">
+        <div class="container-header">
+            <div class="toolbar">
+                <button class="bpb dbs" title="Refresh" @click="fetchStats()">
+                    <i class="icon-sync"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="container-wrapper">
+            <div class="container-content">
+
+                <template v-if="isLoading">
+                    <div class="loader"></div>
+                </template>
+
+                <template v-else>
+
+                    <template v-if="stats">
+                        <table class="tbl w100 zebra">
+                            <thead>
+                                <tr>
+                                    <th rowspan="2">Количество записей</th>
+                                    <th colspan="2">физ. лицо</th>
+                                    <th colspan="4">Юр. Лицо</th>
+                                </tr>
+                                <tr>
+                                    <th>общее количество</th>
+                                    <th>Нет иин</th>
+                                    <th>общее количество</th>
+                                    <th>ИП</th>
+                                    <th>ТОО</th>
+                                    <th>Неформат</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>{{ totalCount }}</td>
+
+                                    <td>{{ stats.person_total }}</td>
+                                    <td>{{ stats.person_without_iin }}</td>
+
+                                    <td>{{ stats.org_total }}</td>
+                                    <td>{{ stats.org_ip }}</td>
+                                    <td>{{ stats.org_too }}</td>
+                                    <td>{{ stats.org_other }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </template>
+
+                    <template v-else>
+                        <div>Нет данных</div>
+                    </template>
+
+                </template>
+
+            </div>
+        </div>
+    </div>
+    `,
+
+    data(){
+        return{
+            stats: null,
+            totalCount: 0,
+            isLoading: false,
+            hasError: false
+        }
+    },
+
+    methods:{
+        async fetchStats(){
+            this.isLoading = true
+            this.hasError = false
+
+            try{
+                const response = await axios.get('/af/subject-stats')
+
+                this.stats = response.data
+
+                this.totalCount =
+                    this.stats.person_total +
+                    this.stats.org_total
+
+            }catch(error){
+                this.hasError = true
+                console.error("Ошибка загрузки отчёта", error)
+            }finally{
+                this.isLoading = false
+            }
+        }
+    },
+
+    mounted(){
+        this.fetchStats()
+    }
+}
