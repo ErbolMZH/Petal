@@ -59,3 +59,15 @@ SELECT
 FROM subject
 WHERE created_data > TO_DATE('01-01-2026','DD-MM-YYYY')
   AND created_data < TO_DATE('31-03-2026','DD-MM-YYYY');
+
+
+
+type SubjectStats struct {
+    PersonTotal       int `db:"person_total" json:"person_total"`
+    PersonWithIIN     int `db:"person_with_iin" json:"person_with_iin"`
+    PersonWithoutIIN  int `db:"person_without_iin" json:"person_without_iin"`
+    OrgTotal          int `db:"org_total" json:"org_total"`
+    OrgToo            int `db:"org_too" json:"org_too"`
+    OrgIp             int `db:"org_ip" json:"org_ip"`
+    OrgOther          int `db:"org_other" json:"org_other"`
+}
