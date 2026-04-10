@@ -1,0 +1,61 @@
+SELECT
+    /* PERSON */
+    COUNT(CASE 
+        WHEN "subjectType" = 'PERSON' 
+        THEN 1 
+    END) AS person_total,
+
+    COUNT(CASE 
+        WHEN "subjectType" = 'PERSON'
+         AND identification_number IS NOT NULL
+        THEN 1 
+    END) AS person_with_iin,
+
+    COUNT(CASE 
+        WHEN "subjectType" = 'PERSON'
+         AND identification_number IS NULL
+        THEN 1 
+    END) AS person_without_iin,
+
+    /* ORGANIZATION */
+    COUNT(CASE 
+        WHEN "subjectType" = 'ORGANIZATION'
+        THEN 1 
+    END) AS org_total,
+
+    COUNT(CASE 
+        WHEN "subjectType" = 'ORGANIZATION'
+         AND (
+            UPPER("name") LIKE 'ТОО %'
+            OR UPPER("name") LIKE 'TOO %'
+            OR UPPER("name") LIKE 'ТОВАРИЩЕСТВО %'
+         )
+        THEN 1 
+    END) AS org_too,
+
+    COUNT(CASE 
+        WHEN "subjectType" = 'ORGANIZATION'
+         AND (
+            UPPER("name") LIKE 'ИП %'
+            OR UPPER("name") LIKE 'IP %'
+            OR UPPER("name") LIKE 'ИНДИВИДУАЛЬНЫЙ %'
+         )
+        THEN 1 
+    END) AS org_ip,
+
+    COUNT(CASE 
+        WHEN "subjectType" = 'ORGANIZATION'
+         AND NOT (
+            UPPER("name") LIKE 'ИП %'
+            OR UPPER("name") LIKE 'IP %'
+            OR UPPER("name") LIKE 'ИНДИВИДУАЛЬНЫЙ %'
+            OR UPPER("name") LIKE 'ТОО %'
+            OR UPPER("name") LIKE 'TOO %'
+            OR UPPER("name") LIKE 'ТОВАРИЩЕСТВО %'
+         )
+        THEN 1 
+    END) AS org_other
+
+FROM subject
+WHERE created_data > TO_DATE('01-01-2026','DD-MM-YYYY')
+  AND created_data < TO_DATE('31-03-2026','DD-MM-YYYY');
