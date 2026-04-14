@@ -1,0 +1,134 @@
+package go1
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/labstack/echo/v4"
+	"github.com/xuri/excelize/v2"
+)
+
+type SubjectStats struct {
+	TotalList        int `db:"total_list" json:"total_list"`
+	PersonTotal      int `db:"person_total" json:"person_total"`
+	PersonWithIIN    int `db:"person_with_iin" json:"person_with_iin"`
+	PersonWithoutIIN int `db:"person_without_iin" json:"person_without_iin"`
+	OrgTotal         int `db:"org_total" json:"org_total"`
+	OrgToo           int `db:"org_too" json:"org_too"`
+	OrgIp            int `db:"org_ip" json:"org_ip"`
+	OrgOther         int `db:"org_other" json:"org_other"`
+}
+
+func AFGetStatistika7Download(c echo.Context) error {
+
+	start := c.QueryParam("start_date")
+	end := c.QueryParam("end_date")
+
+	query := `
+	SELECT
+		count(*) as total_list,
+
+		COUNT(CASE WHEN "subjectType" = 'PERSON' THEN 1 END) AS person_total,
+
+		COUNT(CASE 
+			WHEN "subjectType" = 'PERSON' AND identification_number IS NOT NULL
+		THEN 1 END) AS person_with_iin,
+
+		COUNT(CASE 
+			WHEN "subjectType" = 'PERSON' AND identification_number IS NULL
+		THEN 1 END) AS person_without_iin,
+
+		COUNT(CASE 
+			WHEN "subjectType" = 'ORGANIZATION'
+		THEN 1 END) AS org_total,
+
+		COUNT(CASE 
+			WHEN "subjectType" = 'ORGANIZATION'
+			AND (
+				UPPER("name") LIKE 'ТОО %'
+				OR UPPER("name") LIKE 'TOO %'
+				OR UPPER("name") LIKE 'ТОВАРИЩЕСТВО %'
+			)
+		THEN 1 END) AS org_too,
+
+		COUNT(CASE 
+			WHEN "subjectType" = 'ORGANIZATION'
+			AND (
+				UPPER("name") LIKE 'ИП %'
+				OR UPPER("name") LIKE 'IP %'
+				OR UPPER("name") LIKE 'ИНДИВИДУАЛЬНЫЙ %'
+			)
+		THEN 1 END) AS org_ip,
+
+		COUNT(CASE 
+			WHEN "subjectType" = 'ORGANIZATION'
+			AND NOT (
+				UPPER("name") LIKE 'ИП %'
+				OR UPPER("name") LIKE 'IP %'
+				OR UPPER("name") LIKE 'ИНДИВИДУАЛЬНЫЙ %'
+				OR UPPER("name") LIKE 'ТОО %'
+				OR UPPER("name") LIKE 'TOO %'
+				OR UPPER("name") LIKE 'ТОВАРИЩЕСТВО %'
+			)
+		THEN 1 END) AS org_other
+
+	FROM subject
+	WHERE created_date >= $1::timestamp
+	  AND created_date <= $2::timestamp
+	`
+
+	var row SubjectStats
+
+	err := pg.DB().Get(&row, query, start, end)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"status": false,
+			"error":  err.Error(),
+		})
+	}
+
+	// === Excel ===
+	f := excelize.NewFile()
+
+	sheet := "Report"
+	f.NewSheet(sheet)
+
+	// Заголовки
+	f.SetCellValue(sheet, "A1", "Количество записей")
+	f.SetCellValue(sheet, "B1", "Физ. лицо")
+	f.SetCellValue(sheet, "E1", "Юр. лицо")
+
+	f.SetCellValue(sheet, "B2", "общее количество")
+	f.SetCellValue(sheet, "C2", "Нет ИИН")
+	f.SetCellValue(sheet, "D2", "С ИИН")
+
+	f.SetCellValue(sheet, "E2", "общее количество")
+	f.SetCellValue(sheet, "F2", "ИП")
+	f.SetCellValue(sheet, "G2", "ТОО")
+	f.SetCellValue(sheet, "H2", "Неформат")
+
+	// Merge как в таблице
+	f.MergeCell(sheet, "B1", "D1")
+	f.MergeCell(sheet, "E1", "H1")
+
+	// Данные (строка 3)
+	f.SetCellValue(sheet, "A3", row.TotalList)
+	f.SetCellValue(sheet, "B3", row.PersonTotal)
+	f.SetCellValue(sheet, "C3", row.PersonWithoutIIN)
+	f.SetCellValue(sheet, "D3", row.PersonWithIIN)
+
+	f.SetCellValue(sheet, "E3", row.OrgTotal)
+	f.SetCellValue(sheet, "F3", row.OrgIp)
+	f.SetCellValue(sheet, "G3", row.OrgToo)
+	f.SetCellValue(sheet, "H3", row.OrgOther)
+
+	// Активный лист
+	index, _ := f.GetSheetIndex(sheet)
+	f.SetActiveSheet(index)
+
+	// === Отдача файла ===
+	c.Response().Header().Set(echo.HeaderContentType, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	c.Response().Header().Set(echo.HeaderContentDisposition, "attachment; filename=subject_report.xlsx")
+
+	return f.Write(c.Response().Writer)
+}
