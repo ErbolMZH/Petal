@@ -1,0 +1,32 @@
+func GenerateExcel(data *SubjectStats) error {
+	f := excelize.NewFile()
+	sheet := "Sheet1"
+
+	// Заголовки
+	f.SetCellValue(sheet, "A1", "Количество записей")
+	f.SetCellValue(sheet, "B1", "Физ. лицо")
+	f.SetCellValue(sheet, "E1", "Юр. лицо")
+
+	f.SetCellValue(sheet, "B2", "общее количество")
+	f.SetCellValue(sheet, "C2", "Нет ИИН")
+	f.SetCellValue(sheet, "E2", "общее количество")
+	f.SetCellValue(sheet, "F2", "ИП")
+	f.SetCellValue(sheet, "G2", "ТОО")
+	f.SetCellValue(sheet, "H2", "Неформат")
+
+	// Данные
+	f.SetCellValue(sheet, "A3", data.TotalList)
+	f.SetCellValue(sheet, "B3", data.PersonTotal)
+	f.SetCellValue(sheet, "C3", data.PersonWithoutIIN)
+	f.SetCellValue(sheet, "E3", data.OrgTotal)
+	f.SetCellValue(sheet, "F3", data.OrgIp)
+	f.SetCellValue(sheet, "G3", data.OrgToo)
+	f.SetCellValue(sheet, "H3", data.OrgOther)
+
+	// Merge (как у тебя в примере)
+	f.MergeCell(sheet, "B1", "C1")
+	f.MergeCell(sheet, "E1", "H1")
+
+	// Сохранение
+	return f.SaveAs("report.xlsx")
+}
