@@ -1,0 +1,62 @@
+DECLARE
+    v_VAR_VALUE text;
+    v_TEXT_MOVEMENT text;
+    v_json_result jsonb; -- Переменная для хранения JSON
+BEGIN
+    v_VAR_VALUE := '';
+    v_TEXT_MOVEMENT := '';
+    
+    CALL ADD_TEXT(v_TEXT_MOVEMENT, 'Запуск');
+    CALL ADD_TEXT(v_VAR_VALUE, 'ИИН/БИН=' || in_IIN_BIN);
+
+    -- Получаем данные сразу в формате JSON массив
+    -- Используем COALESCE, чтобы если ничего не найдено, вернулся пустой массив '[]'
+    SELECT coalesce(jsonb_agg(t), '[]'::jsonb) INTO v_json_result
+    FROM (
+        SELECT 
+            id AS "UUID",
+            "subjectType",
+            "creation_method",
+            "iin",
+            "identification_number"
+        FROM public.subject s 
+        WHERE s.identification_number = in_IIN_BIN
+    ) t;
+
+    -- Логика проверки результата
+    IF v_json_result = '[]'::jsonb THEN
+        res := 'NO';
+        res_text := 'Отсутствует в базе Антифрод.';
+    ELSE
+        res := 'OK'; -- Или передайте сам JSON в res, если тип позволяет
+        res_text := 'В Базе Антифрод найден';
+        -- Если нужно вернуть сам JSON в текстовое поле лога:
+        v_VAR_VALUE := v_VAR_VALUE || '; Data=' || v_json_result::text;
+    END IF;
+
+    CALL ADD_TEXT(v_VAR_VALUE, 'res=' || res);
+    CALL ADD_TEXT(v_VAR_VALUE, 'res_text=' || res_text);
+    CALL ADD_TEXT(v_TEXT_MOVEMENT, 'Конец');
+
+    INSERT INTO public.LOG_PROC_CHECK (
+        identification_number, msg_id, system_id, PROC_NAME, VAR_VALUE, TEXT_MOVEMENT
+    )
+    VALUES (
+        in_IIN_BIN, in_msg_ID, in_system_id, 'F_CHECK_AF_PAR', v_VAR_VALUE, v_TEXT_MOVEMENT
+    );
+
+    RETURN;
+
+EXCEPTION
+    WHEN OTHERS THEN 
+        INSERT INTO public.LOG_PROC_CHECK (
+            identification_number, msg_id, system_id, PROC_NAME, VAR_VALUE, TEXT_MOVEMENT
+        )
+        VALUES (
+            in_IIN_BIN, in_msg_ID, in_system_id, 'F_CHECK_AF_PAR', 
+            v_VAR_VALUE, v_TEXT_MOVEMENT || ' Error: ' || SQLSTATE || ' ' || SQLERRM
+        );
+        res := 'ERROR';
+        res_text := 'Ошибка! Обратитесь к администратору системы Антифрод.';
+        RETURN;
+END;
