@@ -1,0 +1,22 @@
+SELECT 
+    category, 
+    COUNT(*) as total_count
+FROM (
+    -- 1. Разворачиваем строку/массив в отдельные элементы
+    SELECT unnest(string_to_array(trim(both '{}' from balck), ', ')) as category
+    FROM subject
+) as exploded_categories
+-- 2. Фильтруем только нужные категории
+WHERE category IN (
+    'GREY', 
+    'BLACK', 
+    'DRUG_CEPI_GREY', 
+    'DRUG_GREY', 
+    'PYRAMID_GREY', 
+    'CASINO_GREY', 
+    'DROPPER'
+)
+-- 3. Группируем и сортируем
+GROUP BY category
+ORDER BY total_count DESC
+LIMIT 3;
