@@ -20,3 +20,30 @@ WHERE category IN (
 GROUP BY category
 ORDER BY total_count DESC
 LIMIT 3;
+
+
+SELECT 
+    trimmed_category AS category, 
+    COUNT(*) as total_count
+FROM (
+    -- 1. Убираем фигурные скобки
+    -- 2. Разбиваем строку в массив по запятой
+    -- 3. Разворачиваем массив в строки (unnest)
+    SELECT unnest(string_to_array(replace(replace(balck, '{', ''), '}', ''), ',')) as raw_category
+    FROM subject
+) as subquery
+-- 4. Убираем лишние пробелы по краям каждой категории
+CROSS JOIN LATERAL trim(raw_category) as trimmed_category
+-- 5. Фильтруем строго по вашему списку
+WHERE trimmed_category IN (
+    'GREY', 
+    'BLACK', 
+    'DRUG_CEPI_GREY', 
+    'DRUG_GREY', 
+    'PYRAMID_GREY', 
+    'CASINO_GREY', 
+    'DROPPER'
+)
+GROUP BY trimmed_category
+ORDER BY total_count DESC
+LIMIT 3;
