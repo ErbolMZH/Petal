@@ -17,3 +17,20 @@ WHERE category IN (
 GROUP BY category
 ORDER BY total_count DESC
 LIMIT 3;
+
+
+SELECT 
+    trim(type_name) AS "Тип инцидента", 
+    COUNT(*) AS "Количество"
+FROM (
+    -- Разделяем строку по точке с запятой, если в ячейке несколько типов
+    SELECT unnest(string_to_array(fraud_type, ';')) as type_name
+    FROM incidents
+    -- Фильтр по дате: 1 квартал 2026
+    WHERE created_date >= '2026-01-01' 
+      AND created_date <  '2026-04-01'
+) as split_data
+-- Убираем пустые строки, которые могут возникнуть из-за лишних ";"
+WHERE trim(type_name) <> ''
+GROUP BY 1
+ORDER BY 2 DESC;
