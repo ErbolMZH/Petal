@@ -1,0 +1,10 @@
+SELECT 
+    s.id,
+    s.category_actual,
+    (
+        SELECT string_agg(cd.code || ' (' || cd.name || ')', ', ')
+        FROM regexp_split_to_table(string_to_array(s.category_actual, '{}')::text, ',\s*') AS val
+        LEFT JOIN category_dictionary cd ON cd.code = val
+        WHERE val != ''
+    ) AS formatted_categories
+FROM subject s;
