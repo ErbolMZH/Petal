@@ -1,0 +1,212 @@
+// Структура для формы создания (id_rec не нужен, его сгенерирует БД)
+type CreateSFOptionInput struct {
+	Code        string `json:"code" db:"code"`
+	Caption     string `json:"caption" db:"caption"`
+	TypeFactors string `json:"type_factors" db:"type_factors"`
+	Actual      int    `json:"actual" db:"actual"`
+}
+
+func createOption(input CreateSFOptionInput) error {
+	// Если используешь sqlx, то удобнее через NamedExec:
+	query := `INSERT INTO sp_nfactors (code, caption, type_factors, actual) 
+	          VALUES (:code, :caption, :type_factors, :actual)`
+	
+	_, err := pg.DB().NamedExec(query, input)
+	if err != nil {
+		log.Println("Error inserting stop-factor:", err)
+		return err
+	}
+	return nil
+}
+
+func AFCreateOption(c echo.Context) error {
+	var input CreateSFOptionInput
+	
+	// Привязываем JSON из тела запроса к структуре
+	if err := c.Bind(&input); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]interface{}{
+			"success": false,
+			"error":   "Неверный формат данных",
+		})
+	}
+
+	// Хардкодим actual = 1 ради безопасности
+	input.Actual = 1
+
+	// Сохраняем в базу
+	if err := createOption(input); err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+	}
+
+	return c.JSON(http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Стоп-фактор успешно создан",
+	})
+}
+
+// В main.go не забудь зарегистрировать роут:
+// e.POST("/api/v1/af-options", AFCreateOption)
+
+
+
+const AFOptionsView = {
+    mixins: [sortMixin],
+    template: `
+    <div class="container mattblock">
+        <div class="container-wrapper2">
+            <!-- Панель управления с кнопкой Создать -->
+            <div class="search-panel mb15 search-row" style="justify-content: flex-end;">
+                <button class="bpb mr10" @click="openModal">
+                    <i class="icon-plus"></i> Создать стоп-фактор
+                </button>
+            </div>
+
+            <!-- Контент таблицы -->
+            <div class="container-content3" style="margin-top:5px;">
+                <template v-if="isLoading">
+                    <div class="loader"></div>
+                </template>
+
+                <template v-else>
+                    <template v-if="reports.length">
+                        <table class="tbl w100 zebra antifraud_table">
+                            <thead>
+                                <tr>   
+                                    <th @click="sortTable('id_rec')">ID записи <span>{{sortIndicator('id_rec')}}</span></th>
+                                    <th @click="sortTable('code')">Код <span>{{sortIndicator('code')}}</span></th>
+                                    <th>Заголовок (Caption)</th>
+                                    <th @click="sortTable('type_factors')">Тип факторов <span>{{sortIndicator('type_factors')}}</span></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="rep in sortedArray(reports,['id_rec'])" :key="rep.id_rec">
+                                    <td>{{ rep.id_rec || '-' }}</td>
+                                    <td class="n1">{{ rep.code || '-' }}</td>
+                                    <td>{{ rep.caption || '-' }}</td>
+                                    <td class="n1">{{ rep.type_factors || '-' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </template>
+                    <template v-else>
+                        <p>Нет доступных данных</p>
+                    </template>
+                </template>
+            </div>
+        </div>
+
+        <!-- МОДАЛЬНОЕ ОКНО (Показывается если isModalOpen === true) -->
+        <div v-if="isModalOpen" class="modal-backdrop" @click.self="closeModal">
+            <div class="modal-content mattblock" style="width: 450px; margin: 10% auto; padding: 20px; border-radius: 4px; box-shadow: 0 4px 15px rgba(0,0,0,0.2);">
+                <h3 class="mb15">Создание нового стоп-фактора</h3>
+                
+                <div class="form-group mb10">
+                    <label style="display:block; margin-bottom:5px; font-weight:bold;">Код (Code):</label>
+                    <input v-model="form.code" class="inp w100" placeholder="Введите код вручную" />
+                </div>
+
+                <div class="form-group mb10">
+                    <label style="display:block; margin-bottom:5px; font-weight:bold;">Заголовок (Caption):</label>
+                    <input v-model="form.caption" class="inp w100" placeholder="Введите заголовок вручную" />
+                </div>
+
+                <div class="form-group mb20">
+                    <label style="display:block; margin-bottom:5px; font-weight:bold;">Тип фактора (Type Factors):</label>
+                    <select v-model="form.type_factors" class="inp w100">
+                        <option value="SF">SF</option>
+                        <option value="KL">KL</option>
+                    </select>
+                </div>
+
+                <div style="text-align: right;">
+                    <button class="bpb dbs mr10" @click="closeModal" :disabled="isSaving">Отмена</button>
+                    <button class="bpb" @click="submitForm" :disabled="isSaving">
+                        {{ isSaving ? 'Сохранение...' : 'Сохранить' }}
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    `,
+
+    data() {
+        return {
+            reports: [],
+            isLoading: false,
+            
+            // Состояние модалки и формы
+            isModalOpen: false,
+            isSaving: false,
+            form: {
+                code: '',
+                caption: '',
+                type_factors: 'SF' // По умолчанию SF
+            }
+        };
+    },
+
+    mounted() {
+        this.fetchReport();
+    },
+
+    methods: {
+        async fetchReport() {
+            this.isLoading = true;
+            try {
+                const resp = await axios.get('/api/v1/af-options');
+                this.reports = resp.data.data || [];
+            } catch (error) {
+                console.error("Ошибка при загрузке данных:", error);
+                alert("Ошибка загрузки данных");
+            } finally {
+                this.isLoading = false;
+            }
+        },
+
+        openModal() {
+            // Сбрасываем поля формы перед открытием
+            this.form.code = '';
+            this.form.caption = '';
+            this.form.type_factors = 'SF';
+            this.isModalOpen = true;
+        },
+
+        closeModal() {
+            this.isModalOpen = false;
+        },
+
+        async submitForm() {
+            // Валидация на фронте
+            if (!this.form.code.trim() || !this.form.caption.trim()) {
+                alert("Заполните все текстовые поля");
+                return;
+            }
+
+            this.isSaving = true;
+            try {
+                const resp = await axios.post('/api/v1/af-options', {
+                    code: this.form.code,
+                    caption: this.form.caption,
+                    type_factors: this.form.type_factors
+                    // 'actual': 1 зашьется на бэке, но можно и сюда дописать при желании
+                });
+
+                if (resp.data.success) {
+                    this.closeModal();
+                    // Перезагружаем таблицу, чтобы увидеть созданную запись
+                    await this.fetchReport(); 
+                } else {
+                    alert("Ошибка: " + resp.data.error);
+                }
+            } catch (error) {
+                console.error("Ошибка при сохранении:", error);
+                alert("Произошла ошибка при отправке запроса");
+            } finally {
+                this.isSaving = false;
+            }
+        }
+    }
+};
