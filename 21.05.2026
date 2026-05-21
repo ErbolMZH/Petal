@@ -1,0 +1,110 @@
+const AFOptionsView = {
+    mixins: [sortMixin],
+    template: `
+    <div class="container mattblock">
+        <div class="container-wrapper2">
+            <!-- Контент -->
+            <div class="container-content3" style="margin-top:5px;">
+
+                <div class="search-panel mb15 search-row">
+                    <select v-model="searchType" class="inp select-fixed">
+                        <option value="code_text">Код текста</option>
+                        <option value="text">Текст</option>
+                        <option value="type_fact">Тип факта</option>
+                    </select>
+                    <input
+                        v-model="searchValue"
+                        class="inp mr10 inp-fixed"
+                        placeholder="Введите значение"
+                        @keyup.enter="fetchReport"/>
+                    
+                    <button class="bpb mr10" @click="fetchReport">Поиск</button>
+                    <button class="bpb dbs" @click="resetSearch"><i class="icon-sync"></i></button>
+                </div>
+
+                <template v-if="isLoading">
+                    <div class="loader"></div>
+                </template>
+
+                <template v-else>
+                    <template v-if="reports.length">
+                        <table class="tbl w100 zebra antifraud_table">
+                            <thead>
+                                <tr>   
+                                    <th @click="sortTable('id_rec')">ID записи <span>{{sortIndicator('id_rec')}}</span></th>
+                                    <th @click="sortTable('code_text')">Код текста <span>{{sortIndicator('code_text')}}</span></th>
+                                    <th>Текст проверки</th>
+                                    <th @click="sortTable('type_fact')">Тип факта <span>{{sortIndicator('type_fact')}}</span></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="rep in sortedArray(reports,['id_rec'])" :key="rep.id_rec" @dblclick="showDetail(rep)" class="clickable">
+                                    <td>{{ rep.id_rec || '-' }}</td>
+                                    <td class="n1">{{ rep.code_text || '-' }}</td>
+                                    <td>{{ rep.text || '-' }}</td>
+                                    <td class="n1">{{ rep.type_fact || '-' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </template>
+
+                    <template v-else>
+                        <p>Нет данных по заданным фильтрам</p>
+                    </template>
+                </template>
+            </div>
+        </div>
+    </div>
+    `,
+
+    data() {
+        return {
+            reports: [],
+            isLoading: false,
+            searchType: 'code_text',
+            searchValue: '',
+        };
+    },
+
+    mounted() {
+        this.fetchReport();
+    },
+
+    methods: {
+        async fetchReport() {
+            this.isLoading = true;
+
+            try {
+                // Укажи здесь актуальный URL твоего Echo хэндлера AFGetOptions
+                const resp = await axios.get('/api/v1/af-options', {
+                    params: {
+                        search_type: this.searchType,
+                        search_value: this.searchValue
+                    }
+                });
+                
+                // Извлекаем массив из resp.data.data, так как Echo возвращает { success: true, data: [...] }
+                this.reports = resp.data.data || [];
+            } catch (error) {
+                console.error("Ошибка при загрузке данных:", error);
+                alert("Ошибка загрузки данных");
+            } finally {
+                this.isLoading = false;
+            }
+        },
+        resetSearch() {
+            this.searchType = 'code_text';
+            this.searchValue = '';
+            this.fetchReport();
+        },
+        showDetail(rep) {
+            // Переход на детальную страницу по ID записи (переименуй name роута, если нужно)
+            this.$router.push({
+                name: 'af-option-detail',
+                params: {
+                    id: rep.id_rec
+                }
+            });
+        }
+    }
+};
