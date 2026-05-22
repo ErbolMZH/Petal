@@ -1,0 +1,22 @@
+func LoadMailTemplate(path string) (*MailTemplateList, error) {
+	// 1. Очищаем путь от хакерских фокусов вроде "/../"
+	cleanPath := filepath.Clean(path)
+
+	// 2. ИБ-проверка: файл шаблона обязательно должен быть JSON
+	if filepath.Ext(cleanPath) != ".json" {
+		return nil, fmt.Errorf("invalid file extension: expected .json")
+	}
+
+	// 3. Заменяем устаревший ioutil.ReadFile на актуальный os.ReadFile
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var t MailTemplateList
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, err
+	}
+
+	return &t, nil
+}
