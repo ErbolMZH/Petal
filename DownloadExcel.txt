@@ -1,0 +1,35 @@
+async downloadExcel() {
+    try {
+        const { start, end } = this.filters;
+        const params = new URLSearchParams({ start, end });
+
+        const response = await axios.get(`/incidents/incident-filter/export?${params.toString()}`, {
+            responseType: 'blob' // Важно для работы с бинарными данными
+        });
+
+        const blob = new Blob([response.data], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+
+        // ИБ-решение: используем FileReader вместо коварного createObjectURL
+        const reader = new FileReader();
+        reader.readAsDataURL(blob); // Конвертируем blob в безопасную Base64 строку
+
+        reader.onloadend = () => {
+            const base64data = reader.result; // Получаем чистые данные файла
+            
+            const link = document.createElement('a');
+            link.href = base64data;
+            link.download = `incident_report_${start}_${end}.xlsx`;
+            
+            document.body.appendChild(link); // Временно добавляем в DOM для стабильности
+            link.click();
+            document.body.removeChild(link); // Сразу удаляем из DOM
+        };
+
+    } catch (error) {
+        // ИБ-исправление: не выводим сырой объект error в консоль (защита от утечки заголовков)
+        console.error("Report download failure");
+        alert("Ошибка при скачивании отчёта");
+    }
+}
