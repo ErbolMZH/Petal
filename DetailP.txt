@@ -104,3 +104,35 @@ const PersonDetail = {
         this.fetchPersonInfo(this.person_id)
     }
 }
+
+
+
+async decryptIbans(ibansList, secretKey) {
+            const decryptedList = [];
+
+            for (let item of ibansList) {
+                try {
+                    if (item.iban) {
+                        // ОБРАТИТЕ ВНИМАНИЕ: используем window.openpgp
+                        const message = await window.openpgp.readMessage({
+                            binaryMessage: typeof item.iban === 'string' ? new TextEncoder().encode(item.iban) : item.iban 
+                        });
+
+                        const { data: decryptedText } = await window.openpgp.decrypt({
+                            message: message,
+                            passwords: [secretKey], // Передаем секретный ключ
+                            format: 'text'
+                        });
+
+                        item.iban = decryptedText; 
+                    }
+                } catch (decryptError) {
+                    console.error("Ошибка расшифровки конкретного IBAN:", decryptError);
+                    item.iban = "Ошибка расшифровки"; 
+                }
+                decryptedList.push(item);
+            }
+
+            return decryptedList;
+        }
+    }
