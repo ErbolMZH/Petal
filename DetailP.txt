@@ -1,0 +1,106 @@
+// Импортируем библиотеку openpgp
+import * as openpgp from 'openpgp';
+
+const PersonDetail = {
+    template: '#person-detail-page',
+    data() {
+        return {
+            activeTab: "iban",
+            isLoading: true,
+            person: null,
+            hasError: false,
+            errorMessage: "",
+            incident_role: "-",
+            person_id: this.$route.params.id
+        }
+    },
+    beforeRouteUpdate(to, from, next) {
+        this.person_id = to.params.id
+        this.fetchPersonInfo(this.person_id)
+        next();
+    },
+    methods: {
+        async fetchPersonInfo() {
+            this.isLoading = true
+            this.hasError = false
+            try {
+                // 1. Получаем данные пользователя (с зашифрованными IBAN)
+                const resp = await axios.get(`/incidents/person/${this.person_id}`)
+                let personData = resp.data.data
+
+                // 2. Получаем секретный ключ со стороннего сервера ключей
+                // (Замените URL на ваш реальный эндпоинт)
+                const keyResp = await axios.get('/api/get-decryption-key')
+                const secretKey = keyResp.data.key 
+
+                // 3. Расшифровываем IBAN'ы, если они есть в ответе
+                if (personData.Ibans && personData.Ibans.length > 0) {
+                    personData.Ibans = await this.decryptIbans(personData.Ibans, secretKey)
+                }
+
+                this.person = personData
+
+            } catch (error) {
+                this.hasError = true
+                this.errorMessage = error.response ? error.response.data : error;
+            } finally {
+                this.isLoading = false;
+            }
+        },
+
+        // Метод для расшифровки массива IBAN
+        async decryptIbans(ibansList, secretKey) {
+            const decryptedList = [];
+
+            for (let item of ibansList) {
+                try {
+                    // Проверяем, зашифрованы ли данные (PGP сообщения обычно начинаются с определенного маркера или идут в bytea)
+                    if (item.iban) {
+                        
+                        // Если данные пришли как бинарный хекс/base64 из bytea, 
+                        // openpgp ожидает Uint8Array или строку Armor.
+                        // Предположим, Go отдал строку OpenPGP Armor или бинарные данные, сконвертированные в текст:
+                        const message = await openpgp.readMessage({
+                            binaryMessage: typeof item.iban === 'string' ? new TextEncoder().encode(item.iban) : item.iban 
+                        });
+
+                        // Расшифровка с использованием симметричного ключа (passphrase)
+                        const { data: decryptedText } = await openpgp.decrypt({
+                            message: message,
+                            passwords: [secretKey], // Тот самый ключ f_get_key(), переданный как пароль
+                            format: 'text'
+                        });
+
+                        item.iban = decryptedText; // Заменяем зашифрованный текст на расшифрованный
+                    }
+                } catch (decryptError) {
+                    console.error("Ошибка расшифровки конкретного IBAN:", decryptError);
+                    item.iban = "Ошибка расшифровки"; // Заглушка на случай неверного ключа
+                }
+                decryptedList.push(item);
+            }
+
+            return decryptedList;
+        },
+
+        toggleTab(name) {
+            this.activeTab = name;
+        },
+        toLocaleDate(date) {
+            if (date == "0001-01-01T00:00:00Z") {
+                return "-"
+            }
+            return date ? new Date(date).toLocaleString('ru-RU', {
+                day: "numeric", month: "long", year: "numeric",
+                hour: "2-digit", minute: "2-digit", second: "2-digit"
+            }) : "-"
+        },
+        goBack() {
+            this.$router.go(-1)
+        }
+    },
+    mounted() {
+        this.person_id = this.$route.params.id
+        this.fetchPersonInfo(this.person_id)
+    }
+}
