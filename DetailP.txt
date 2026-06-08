@@ -84,3 +84,61 @@ async decryptIbans(ibansList, secretKey) {
 
     return decryptedList;
 }
+
+
+async decryptIbans(ibansList, secretKey) {
+    const decryptedList = [];
+
+    for (let item of ibansList) {
+        try {
+            if (item.iban) {
+                let rawIban = item.iban.trim();
+                let bytes;
+
+                // 1. Декодируем Hex из Postgres
+                if (rawIban.startsWith('\\x')) {
+                    let hexString = rawIban.slice(2);
+                    const isHex = /^[0-9a-fA-F]+$/.test(hexString);
+
+                    if (isHex) {
+                        const len = hexString.length;
+                        bytes = new Uint8Array(len / 2);
+                        for (let i = 0, j = 0; i < len; i += 2, j++) {
+                            bytes[j] = parseInt(hexString.substr(i, 2), 16);
+                        }
+                    } else {
+                        bytes = new TextEncoder().encode(rawIban);
+                    }
+                } else {
+                    bytes = new TextEncoder().encode(rawIban);
+                }
+
+                // 2. Читаем OpenPGP сообщение
+                const message = await window.openpgp.readMessage({
+                    binaryMessage: bytes 
+                });
+
+                // 3. Расшифровываем с отключением строгой проверки MDC
+                const { data: decryptedText } = await window.openpgp.decrypt({
+                    message: message,
+                    passwords: [secretKey],
+                    format: 'text',
+                    
+                    // ДОБАВЛЯЕМ ЭТУ НАСТРОЙКУ ДЛЯ СОВМЕСТИМОСТИ С POSTGRES:
+                    config: { 
+                        allowInsecureDecryptionWithMissingMDC: true 
+                    }
+                });
+
+                console.log("УРА! Данные успешно расшифрованы:", decryptedText);
+                item.iban = decryptedText; 
+            }
+        } catch (decryptError) {
+            console.error("Не удалось расшифровать этот IBAN. Ошибка:", decryptError);
+            item.iban = "Ошибка расшифровки"; 
+        }
+        decryptedList.push(item);
+    }
+
+    return decryptedList;
+}
