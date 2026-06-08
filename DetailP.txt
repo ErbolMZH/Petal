@@ -136,3 +136,52 @@ async decryptIbans(ibansList, secretKey) {
             return decryptedList;
         }
     }
+
+
+
+
+async decryptIbans(ibansList, secretKey) {
+    const decryptedList = [];
+
+    for (let item of ibansList) {
+        try {
+            if (item.iban) {
+                let hexString = item.iban.trim();
+                console.log("Получен зашифрованный текст из базы:", hexString);
+
+                // 1. Проверяем, начинается ли строка с префикса Postgres Hex '\x'
+                if (hexString.startsWith('\\x')) {
+                    hexString = hexString.slice(2); // Удаляем '\x'
+                }
+
+                // 2. Конвертируем Hex-строку в массив байт (Uint8Array)
+                const len = hexString.length;
+                const bytes = new Uint8Array(len / 2);
+                for (let i = 0, j = 0; i < len; i += 2, j++) {
+                    bytes[j] = parseInt(hexString.substr(i, 2), 16);
+                }
+
+                // 3. Читаем бинарное сообщение OpenPGP
+                const message = await window.openpgp.readMessage({
+                    binaryMessage: bytes 
+                });
+
+                // 4. Расшифровываем
+                const { data: decryptedText } = await window.openpgp.decrypt({
+                    message: message,
+                    passwords: [secretKey], // Текстовый ключ-переменная
+                    format: 'text'
+                });
+
+                console.log("Успешно расшифровано:", decryptedText);
+                item.iban = decryptedText; // Подменяем текст на расшифрованный
+            }
+        } catch (decryptError) {
+            console.error("Критическая ошибка при расшифровке:", decryptError);
+            item.iban = "Ошибка расшифровки"; 
+        }
+        decryptedList.push(item);
+    }
+
+    return decryptedList;
+}
