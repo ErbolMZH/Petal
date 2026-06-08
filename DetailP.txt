@@ -1,144 +1,28 @@
-// Импортируем библиотеку openpgp
-import * as openpgp from 'openpgp';
-curl -o openpgp.min.js https://cdnjs.cloudflare.com/ajax/libs/openpgp/5.11.1/openpgp.min.js
-const PersonDetail = {
-    template: '#person-detail-page',
-    data() {
-        return {
-            activeTab: "iban",
-            isLoading: true,
-            person: null,
-            hasError: false,
-            errorMessage: "",
-            incident_role: "-",
-            person_id: this.$route.params.id
+async fetchPersonInfo() {
+    this.isLoading = true;
+    this.hasError = false;
+    try {
+        const resp = await axios.get(`/incidents/person/${this.person_id}`);
+        let personData = resp.data.data;
+
+        // Вставьте сюда точный пароль из вашей SQL функции f_get_key()
+        const secretKey = "СЮДА_ВСТАВЬТЕ_ВАШ_КЛЮЧ"; 
+
+        // Массив гарантированно лежит в personData.ibans
+        if (personData.ibans && personData.ibans.length > 0) {
+            console.log(`Найдено ${personData.ibans.length} зашифрованных IBAN. Начинаем дешифрацию...`);
+            personData.ibans = await this.decryptIbans(personData.ibans, secretKey);
         }
-    },
-    beforeRouteUpdate(to, from, next) {
-        this.person_id = to.params.id
-        this.fetchPersonInfo(this.person_id)
-        next();
-    },
-    methods: {
-        async fetchPersonInfo() {
-            this.isLoading = true
-            this.hasError = false
-            try {
-                // 1. Получаем данные пользователя (с зашифрованными IBAN)
-                const resp = await axios.get(`/incidents/person/${this.person_id}`)
-                let personData = resp.data.data
 
-                // 2. Получаем секретный ключ со стороннего сервера ключей
-                // (Замените URL на ваш реальный эндпоинт)
-                const keyResp = await axios.get('/api/get-decryption-key')
-                const secretKey = keyResp.data.key 
+        this.person = personData;
 
-                // 3. Расшифровываем IBAN'ы, если они есть в ответе
-                if (personData.Ibans && personData.Ibans.length > 0) {
-                    personData.Ibans = await this.decryptIbans(personData.Ibans, secretKey)
-                }
-
-                this.person = personData
-
-            } catch (error) {
-                this.hasError = true
-                this.errorMessage = error.response ? error.response.data : error;
-            } finally {
-                this.isLoading = false;
-            }
-        },
-
-        // Метод для расшифровки массива IBAN
-        async decryptIbans(ibansList, secretKey) {
-            const decryptedList = [];
-
-            for (let item of ibansList) {
-                try {
-                    // Проверяем, зашифрованы ли данные (PGP сообщения обычно начинаются с определенного маркера или идут в bytea)
-                    if (item.iban) {
-                        
-                        // Если данные пришли как бинарный хекс/base64 из bytea, 
-                        // openpgp ожидает Uint8Array или строку Armor.
-                        // Предположим, Go отдал строку OpenPGP Armor или бинарные данные, сконвертированные в текст:
-                        const message = await openpgp.readMessage({
-                            binaryMessage: typeof item.iban === 'string' ? new TextEncoder().encode(item.iban) : item.iban 
-                        });
-
-                        // Расшифровка с использованием симметричного ключа (passphrase)
-                        const { data: decryptedText } = await openpgp.decrypt({
-                            message: message,
-                            passwords: [secretKey], // Тот самый ключ f_get_key(), переданный как пароль
-                            format: 'text'
-                        });
-
-                        item.iban = decryptedText; // Заменяем зашифрованный текст на расшифрованный
-                    }
-                } catch (decryptError) {
-                    console.error("Ошибка расшифровки конкретного IBAN:", decryptError);
-                    item.iban = "Ошибка расшифровки"; // Заглушка на случай неверного ключа
-                }
-                decryptedList.push(item);
-            }
-
-            return decryptedList;
-        },
-
-        toggleTab(name) {
-            this.activeTab = name;
-        },
-        toLocaleDate(date) {
-            if (date == "0001-01-01T00:00:00Z") {
-                return "-"
-            }
-            return date ? new Date(date).toLocaleString('ru-RU', {
-                day: "numeric", month: "long", year: "numeric",
-                hour: "2-digit", minute: "2-digit", second: "2-digit"
-            }) : "-"
-        },
-        goBack() {
-            this.$router.go(-1)
-        }
-    },
-    mounted() {
-        this.person_id = this.$route.params.id
-        this.fetchPersonInfo(this.person_id)
+    } catch (error) {
+        this.hasError = true;
+        this.errorMessage = error.response ? error.response.data : error;
+    } finally {
+        this.isLoading = false;
     }
-}
-
-
-
-async decryptIbans(ibansList, secretKey) {
-            const decryptedList = [];
-
-            for (let item of ibansList) {
-                try {
-                    if (item.iban) {
-                        // ОБРАТИТЕ ВНИМАНИЕ: используем window.openpgp
-                        const message = await window.openpgp.readMessage({
-                            binaryMessage: typeof item.iban === 'string' ? new TextEncoder().encode(item.iban) : item.iban 
-                        });
-
-                        const { data: decryptedText } = await window.openpgp.decrypt({
-                            message: message,
-                            passwords: [secretKey], // Передаем секретный ключ
-                            format: 'text'
-                        });
-
-                        item.iban = decryptedText; 
-                    }
-                } catch (decryptError) {
-                    console.error("Ошибка расшифровки конкретного IBAN:", decryptError);
-                    item.iban = "Ошибка расшифровки"; 
-                }
-                decryptedList.push(item);
-            }
-
-            return decryptedList;
-        }
-    }
-
-
-
+},
 
 async decryptIbans(ibansList, secretKey) {
     const decryptedList = [];
@@ -146,38 +30,53 @@ async decryptIbans(ibansList, secretKey) {
     for (let item of ibansList) {
         try {
             if (item.iban) {
-                let hexString = item.iban.trim();
-                console.log("Получен зашифрованный текст из базы:", hexString);
+                let rawIban = item.iban.trim();
+                console.log("Шифр-текст из базы:", rawIban);
 
-                // 1. Проверяем, начинается ли строка с префикса Postgres Hex '\x'
-                if (hexString.startsWith('\\x')) {
-                    hexString = hexString.slice(2); // Удаляем '\x'
+                let bytes;
+
+                // 1. Декодируем данные в зависимости от формата Postgres
+                if (rawIban.startsWith('\\x')) {
+                    // Удаляем префикс '\x'
+                    let hexString = rawIban.slice(2);
+                    
+                    // Проверяем, валидный ли это HEX (только 0-9, a-f)
+                    const isHex = /^[0-9a-fA-F]+$/.test(hexString);
+
+                    if (isHex) {
+                        // Вариант А: Чистый HEX формат
+                        const len = hexString.length;
+                        bytes = new Uint8Array(len / 2);
+                        for (let i = 0, j = 0; i < len; i += 2, j++) {
+                            bytes[j] = parseInt(hexString.substr(i, 2), 16);
+                        }
+                    } else {
+                        // Вариант Б: Если Postgres вернул строку в формате 'escape' 
+                        // (когда бинарные данные переводятся в ASCII-подобную строку)
+                        bytes = new TextEncoder().encode(rawIban);
+                    }
+                } else {
+                    // Вариант В: Обычная строка (если Go уже превратил байты в строку текста)
+                    bytes = new TextEncoder().encode(rawIban);
                 }
 
-                // 2. Конвертируем Hex-строку в массив байт (Uint8Array)
-                const len = hexString.length;
-                const bytes = new Uint8Array(len / 2);
-                for (let i = 0, j = 0; i < len; i += 2, j++) {
-                    bytes[j] = parseInt(hexString.substr(i, 2), 16);
-                }
-
-                // 3. Читаем бинарное сообщение OpenPGP
+                // 2. Читаем OpenPGP сообщение из полученных байтов
                 const message = await window.openpgp.readMessage({
                     binaryMessage: bytes 
                 });
 
-                // 4. Расшифровываем
+                // 3. Расшифровываем с помощью секретного ключа
                 const { data: decryptedText } = await window.openpgp.decrypt({
                     message: message,
-                    passwords: [secretKey], // Текстовый ключ-переменная
+                    passwords: [secretKey],
                     format: 'text'
                 });
 
-                console.log("Успешно расшифровано:", decryptedText);
-                item.iban = decryptedText; // Подменяем текст на расшифрованный
+                console.log("УРА! Результат расшифровки:", decryptedText);
+                item.iban = decryptedText; // Подменяем зашифрованную строку на чистый IBAN
             }
         } catch (decryptError) {
-            console.error("Критическая ошибка при расшифровке:", decryptError);
+            console.error("Не удалось расшифровать этот IBAN. Ошибка:", decryptError);
             item.iban = "Ошибка расшифровки"; 
         }
         decryptedList.push(item);
