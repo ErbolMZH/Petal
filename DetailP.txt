@@ -1,6 +1,6 @@
 // Импортируем библиотеку openpgp
 import * as openpgp from 'openpgp';
-
+curl -o openpgp.min.js https://cdnjs.cloudflare.com/ajax/libs/openpgp/5.11.1/openpgp.min.js
 const PersonDetail = {
     template: '#person-detail-page',
     data() {
