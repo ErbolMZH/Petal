@@ -1,61 +1,116 @@
-async decryptIbans(ibansList, secretKey) {
-    const decryptedList = [];
+// Если используете модули, не забудьте импорт в самом верху файла:
+// import * as openpgp from 'openpgp';
 
-    for (let item of ibansList) {
-        try {
-            if (item.iban) {
-                let rawIban = item.iban.trim();
-                let bytes;
-
-                // 1. Декодируем Hex из Postgres
-                if (rawIban.startsWith('\\x')) {
-                    let hexString = rawIban.slice(2);
-                    const isHex = /^[0-9a-fA-F]+$/.test(hexString);
-                    if (isHex) {
-                        const len = hexString.length;
-                        bytes = new Uint8Array(len / 2);
-                        for (let i = 0, j = 0; i < len; i += 2, j++) {
-                            bytes[j] = parseInt(hexString.substr(i, 2), 16);
-                        }
-                    } else {
-                        bytes = new TextEncoder().encode(rawIban);
-                    }
-                } else {
-                    bytes = new TextEncoder().encode(rawIban);
-                }
-
-                // 2. Читаем OpenPGP сообщение
-                const message = await window.openpgp.readMessage({
-                    binaryMessage: bytes 
-                });
-
-                // 3. Расшифровываем
-                // В новых версиях если сообщение без MDC, мы отлавливаем его 
-                // через встроенные параметры или перехват специфичного варнинга
-                const { data: decryptedText } = await window.openpgp.decrypt({
-                    message: message,
-                    passwords: [secretKey],
-                    format: 'text',
-                    // Указываем явный отказ от обязательной подписи, 
-                    // это часто помогает пропустить строгие проверки целостности пакета v3
-                    expectSigned: false 
-                });
-
-                console.log("УРА! Данные успешно расшифрованы:", decryptedText);
-                item.iban = decryptedText; 
-            }
-        } catch (decryptError) {
-            // Если библиотека ВСЁ РАВНО ругается на MDC, но текст ошибки изменился,
-            // мы можем посмотреть, вернула ли она частично расшифрованные данные
-            if (decryptError.message && decryptError.message.includes('Modification detected')) {
-                 console.warn("Предупреждение MDC проигнорировано (специфика Postgres).");
-            }
+const PersonDetail = {
+    template: '#person-detail-page',
+    data() {
+        return {
+            activeTab: "iban",
+            isLoading: true,
+            person: null,
+            hasError: false,
+            errorMessage: "",
+            incident_role: "-",
+            person_id: this.$route.params.id,
             
-            console.error("Не удалось расшифровать этот IBAN. Ошибка:", decryptError);
-            item.iban = "Ошибка расшифровки"; 
+            // Добавляем новые переменные для контроля состояния расшифровки
+            decryptedIban: "",
+            isDecrypting: false
         }
-        decryptedList.push(item);
-    }
+    },
+    beforeRouteUpdate(to, from, next) {
+        this.person_id = to.params.id
+        this.fetchPersonInfo(this.person_id)
+        next();
+    },
+    methods: {
+        async fetchPersonInfo() {
+            this.isLoading = true
+            this.hasError = false
+            // Сбрасываем старый расшифрованный IBAN при смене пользователя
+            this.decryptedIban = "" 
+            try {
+                const resp = await axios.get(`/incidents/person/${this.person_id}`)
+                this.person = resp.data.data
 
-    return decryptedList;
+                // Если вы хотите расшифровывать IBAN автоматически сразу при загрузке:
+                // if (this.person && this.person.iban) {
+                //     this.decryptedIban = await this.decryptIban(this.person.iban);
+                // }
+
+            } catch (error) {
+                this.hasError = true
+                this.errorMessage = error.response ? error.response.data : error;
+            } catch (err) {
+                this.hasError = true
+                this.errorMessage = err;
+            } finally {
+                this.isLoading = false;
+            }
+        },
+
+        // --- НОВАЯ ФУНКЦИЯ ДЛЯ РАСШИФРОВКИ НА ФРОНТЕНДЕ ---
+        async decryptIban(encryptedHex) {
+            if (!encryptedHex) return "-";
+            
+            this.isDecrypting = true;
+            try {
+                // 1. Аналог SQL decode(..., 'hex') -> переводим HEX-строку в массив байт (Uint8Array)
+                const byteArray = new Uint8Array(
+                    encryptedHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
+                );
+
+                // 2. Читаем бинарное PGP сообщение
+                const message = await openpgp.readMessage({
+                    binaryMessage: byteArray
+                });
+
+                // 3. Расшифровываем встроенным в openpgp методом (симметричный пароль)
+                const { data: decrypted } = await openpgp.decrypt({
+                    message: message,
+                    passwords: ['ВАШ_СЕКРЕТНЫЙ_КЛЮЧ'], // <- Тот самый ключ, который возвращает f_get_key()
+                    format: 'text'
+                });
+
+                return decrypted; // Возвращает чистый текст IBAN
+            } catch (error) {
+                console.error("Ошибка расшифровки IBAN на фронтенде:", error);
+                return "Ошибка расшифровки";
+            } finally {
+                this.isDecrypting = false;
+            }
+        },
+
+        // Функция-триггер для вызова по кнопке «Показать IBAN»
+        async handleShowIban() {
+            if (this.person && this.person.iban && !this.decryptedIban) {
+                this.decryptedIban = await this.decryptIban(this.person.iban);
+            }
+        },
+
+        toggleTab(name) {
+            this.activeTab = name;
+        },
+        toLocaleDate(date) {
+            if (date == "0001-01-01T00:00:00Z") {
+                return "-"
+            }
+
+            return date ? new Date(date).toLocaleString('ru-RU', {
+                day: "numeric",
+                month: "long",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit"
+            }) : "-"
+        },
+        goBack() {
+            this.$router.go(-1)
+        }
+    },
+    mounted() {
+        this.person_id = this.$route.params.id
+        this.fetchPersonInfo(this.person_id)
+    }
 }
