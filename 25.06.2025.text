@@ -39,3 +39,40 @@ WHERE
     -- Сравниваем даты: к отстающей дате subject прибавляем 6 часов
     AND substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
         > (s.updated_date + INTERVAL '6 hours');
+
+
+
+SELECT 
+    n.id AS notification_id,
+    n.n_type,
+    -- Вытаскиваем ID и дату для контроля в результате
+    substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)') AS parsed_subject_id,
+    substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp AS notification_date,
+    s.id AS subject_id,
+    s.created_date,
+    s.updated_date,
+    s.deleted_date
+FROM 
+    notifications n
+JOIN 
+    subject s 
+    ON s.id::text = substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)')::text
+WHERE 
+    -- 1. Фильтруем только нужные типы уведомлений
+    n.n_type IN ('subject_categories_update', 'subject_categories_delete', 'subject_create', 'subject_delete', 'subject_update')
+    
+    -- 2. Динамически проверяем нужную колонку в зависимости от n_type
+    AND substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
+        != CASE 
+            -- Для создания смотрим на created_date
+            WHEN n.n_type = 'subject_create' 
+                THEN s.created_date + INTERVAL '6 hours'
+            
+            -- Для удалений смотрим на deleted_date
+            WHEN n.n_type IN ('subject_delete', 'subject_categories_delete') 
+                THEN s.deleted_date + INTERVAL '6 hours'
+            
+            -- Для всех видов обновлений смотрим на updated_date
+            WHEN n.n_type IN ('subject_update', 'subject_categories_update') 
+                THEN s.updated_date + INTERVAL '6 hours'
+           END;
