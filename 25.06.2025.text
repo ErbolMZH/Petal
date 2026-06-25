@@ -39,3 +39,32 @@ WHERE
             ELSE s.updated_date
         END
     ))) / 3600 NOT BETWEEN 4.0 AND 7.0;
+
+
+
+
+    SELECT 
+    n.n_type AS "Тип уведомления",
+    COUNT(*) AS "Количество рассинхронов"
+FROM 
+    notifications n
+JOIN 
+    subject s 
+    ON s.id::text = substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)')::text
+WHERE 
+    n.n_type IN ('subject_categories_update', 'subject_categories_delete', 'subject_create', 'subject_delete', 'subject_update')
+    
+    -- Условие рассинхрона (разница НЕ между 4 и 7 часами)
+    AND ABS(EXTRACT(EPOCH FROM (
+        substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
+        - 
+        CASE 
+            WHEN n.n_type = 'subject_create' THEN s.created_date
+            WHEN n.n_type IN ('subject_delete', 'subject_categories_delete') THEN s.deleted_date
+            ELSE s.updated_date
+        END
+    ))) / 3600 NOT BETWEEN 4.0 AND 7.0
+GROUP BY 
+    n.n_type
+ORDER BY 
+    "Количество рассинхронов" DESC;
