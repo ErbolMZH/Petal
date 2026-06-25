@@ -1,0 +1,19 @@
+SELECT 
+    n.id AS notification_id,
+    -- Вытаскиваем ID из текста для наглядности в отчете
+    REGEXP_SUBSTR(n.content_summary, 'ID\s+субъекта:\s*([a-zA-Z0-9]+)', 1, 1, NULL, 1) AS parsed_subject_id,
+    -- Вытаскиваем дату из текста уведомления
+    TO_DATE(REGEXP_SUBSTR(n.content_summary, 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})', 1, 1, NULL, 1), 'YYYY-MM-DD HH24:MI:SS') AS notification_date,
+    s.id AS subject_id,
+    s.updated_date AS subject_updated_date
+FROM 
+    notifications n
+JOIN 
+    subject s 
+    -- Вытаскиваем ID из текста уведомления и связываем с нормальным id из таблицы subject
+    ON s.id = REGEXP_SUBSTR(n.content_summary, 'ID\s+субъекта:\s*([a-zA-Z0-9]+)', 1, 1, NULL, 1)
+WHERE 
+    n.n_type = 'subject_categories_update'
+    -- Условие: в уведомлении дата свежее, чем в самой таблице subject (с учетом сдвига на 6 часов)
+    AND TO_DATE(REGEXP_SUBSTR(n.content_summary, 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})', 1, 1, NULL, 1), 'YYYY-MM-DD HH24:MI:SS') 
+        > (s.updated_date + INTERVAL '6' HOUR);
