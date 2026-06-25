@@ -17,3 +17,25 @@ WHERE
     -- Условие: в уведомлении дата свежее, чем в самой таблице subject (с учетом сдвига на 6 часов)
     AND TO_DATE(REGEXP_SUBSTR(n.content_summary, 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})', 1, 1, NULL, 1), 'YYYY-MM-DD HH24:MI:SS') 
         > (s.updated_date + INTERVAL '6' HOUR);
+
+
+
+        SELECT 
+    n.id AS notification_id,
+    -- Вытаскиваем ID (ищем всё, что идет после 'ID субъекта:' до ближайшего пробела или конца строки)
+    substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)') AS parsed_subject_id,
+    -- Вытаскиваем дату и сразу кастуем её в TIMESTAMP
+    substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp AS notification_date,
+    s.id AS subject_id,
+    s.updated_date AS subject_updated_date
+FROM 
+    notifications n
+JOIN 
+    subject s 
+    -- Приводим обе стороны к text (на случай, если s.id имеет тип uuid или int, а из текста мы получили строку)
+    ON s.id::text = substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)')::text
+WHERE 
+    n.n_type = 'subject_categories_update'
+    -- Сравниваем даты: к отстающей дате subject прибавляем 6 часов
+    AND substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
+        > (s.updated_date + INTERVAL '6 hours');
