@@ -76,3 +76,48 @@ WHERE
             WHEN n.n_type IN ('subject_update', 'subject_categories_update') 
                 THEN s.updated_date + INTERVAL '6 hours'
            END;
+
+
+
+
+SELECT 
+    n.id AS notification_id,
+    n.n_type,
+    substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)') AS parsed_subject_id,
+    substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp AS notification_date,
+    s.id AS subject_id,
+    CASE 
+        WHEN n.n_type = 'subject_create' THEN s.created_date
+        WHEN n.n_type IN ('subject_delete', 'subject_categories_delete') THEN s.deleted_date
+        ELSE s.updated_date
+    END AS db_date,
+    -- Высчитываем чистую разницу в часах для наглядности в отчете
+    ABS(EXTRACT(EPOCH FROM (
+        substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
+        - 
+        CASE 
+            WHEN n.n_type = 'subject_create' THEN s.created_date
+            WHEN n.n_type IN ('subject_delete', 'subject_categories_delete') THEN s.deleted_date
+            ELSE s.updated_date
+        END
+    ))) / 3600 AS hours_difference
+FROM 
+    notifications n
+JOIN 
+    subject s 
+    ON s.id::text = substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)')::text
+WHERE 
+    n.n_type IN ('subject_categories_update', 'subject_categories_delete', 'subject_create', 'subject_delete', 'subject_update')
+    
+    -- Условие рассинхронизации:
+    -- Если разница между уведомлением и базой НЕ входит в диапазон от 4 до 7 часов,
+    -- значит это реальная просрочка обновления.
+    AND ABS(EXTRACT(EPOCH FROM (
+        substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
+        - 
+        CASE 
+            WHEN n.n_type = 'subject_create' THEN s.created_date
+            WHEN n.n_type IN ('subject_delete', 'subject_categories_delete') THEN s.deleted_date
+            ELSE s.updated_date
+        END
+    ))) / 3600 NOT BETWEEN 4.0 AND 7.0;
