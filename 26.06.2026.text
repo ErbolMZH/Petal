@@ -46,3 +46,62 @@ WHERE
     -- 2. Разница составляет, например, больше 1 минуты (чтобы отсечь нормальный лаг системы)
     -- Если вам нужен абсолютно любой рассинхрон, поставьте просто > 0
     AND EXTRACT(EPOCH FROM (notification_date - target_db_date)) / 60 > 1.0;
+--------------------------------------------------------------------------------------------------------
+
+
+WITH parsed_notifications AS (
+    SELECT 
+        n.id AS notification_id,
+        n.n_type,
+        -- 1. Вытаскиваем ID и дату из текста уведомления
+        substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)') AS parsed_subject_id,
+        
+        -- Указываем, что дата в тексте — это UTC. База сама приведет её к (+05) для сравнения
+        (substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
+         AT TIME ZONE 'UTC') AS notification_date_converted,
+         
+        -- Исходный текст даты из уведомления (для контроля глазами)
+        substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})') AS raw_notification_date,
+        
+        -- 2. Данные из таблицы subject
+        s.id AS subject_id,
+        s.created_date AS db_created_date,
+        s.updated_date AS db_updated_date,
+        s.deleted_date AS db_deleted_date,
+        
+        -- Целевая дата из БД для сравнения
+        CASE 
+            WHEN n.n_type = 'subject_create' THEN s.created_date
+            WHEN n.n_type IN ('subject_delete', 'subject_categories_delete') THEN s.deleted_date
+            ELSE s.updated_date
+        END AS target_db_date
+    FROM 
+        notifications n
+    JOIN 
+        subject s 
+        ON s.id::text = substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)')::text
+    WHERE 
+        n.n_type IN ('subject_categories_update', 'subject_categories_delete', 'subject_create', 'subject_delete', 'subject_update')
+)
+SELECT 
+    notification_id,
+    n_type,
+    parsed_subject_id,
+    raw_notification_date AS msg_date_raw,
+    notification_date_converted AS msg_date_with_tz,
+    target_db_date AS db_date_with_tz,
+    -- Разница в минутах (если > 0, значит уведомление пришло позже, а в БД старые данные)
+    EXTRACT(EPOCH FROM (notification_date_converted - target_db_date)) / 60 AS diff_minutes,
+    -- Для полной картины выводим все даты из БД
+    db_created_date,
+    db_updated_date,
+    db_deleted_date
+FROM 
+    parsed_notifications
+WHERE 
+    -- Условие: Уведомление создано позже, чем зафиксировано обновление в БД
+    notification_date_converted > target_db_date
+    -- Зазор в 1 минуту, чтобы отсечь микрозадержки системы
+    AND EXTRACT(EPOCH FROM (notification_date_converted - target_db_date)) / 60 > 1.0
+ORDER BY 
+    diff_minutes DESC;
