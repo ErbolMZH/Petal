@@ -145,3 +145,45 @@ GROUP BY
     parsed_subject_id
 ORDER BY 
     max_diff_hours DESC;
+
+
+
+    ---------------------------------------------------------------------------------------------------------------------------------------
+
+
+
+    INSERT INTO subject_update (id, status)
+WITH parsed_notifications AS (
+    SELECT 
+        substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)') AS parsed_subject_id,
+        
+        -- Учитываем временную зону UTC из уведомления
+        (substring(n.content_summary FROM 'Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})')::timestamp 
+         AT TIME ZONE 'UTC') AS notification_date_converted,
+        
+        -- Определяем дату в БД для сравнения
+        CASE 
+            WHEN n.n_type = 'subject_create' THEN s.created_date
+            WHEN n.n_type IN ('subject_delete', 'subject_categories_delete') THEN s.deleted_date
+            ELSE s.updated_date
+        END AS target_db_date
+    FROM 
+        notifications n
+    JOIN 
+        subject s 
+        ON s.id::text = substring(n.content_summary FROM 'ID\s+субъекта:\s*([^\s]+)')::text
+    WHERE 
+        n.n_type IN ('subject_categories_update', 'subject_categories_delete', 'subject_create', 'subject_delete', 'subject_update')
+)
+SELECT 
+    parsed_subject_id::bigint, -- Приведите к типу вашей колонки id (например, ::bigint или ::text)
+    1 AS status
+FROM 
+    parsed_notifications
+WHERE 
+    -- Фильтр: уведомление позже даты в БД более чем на 6 часов
+    notification_date_converted > target_db_date
+    AND EXTRACT(EPOCH FROM (notification_date_converted - target_db_date)) / 3600 > 6.0
+GROUP BY 
+    parsed_subject_id
+ON CONFLICT (id) DO NOTHING;
