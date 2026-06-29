@@ -1,0 +1,41 @@
+-----------------------incidents-----------------------
+FOR dat_incident IN 
+    select d.*
+    from JSON_TABLE(
+        dat.incidents, -- Поле с инцидентами из вашего основного JSON/таблицы
+        '$[*]'
+        COLUMNS (
+            incident_id          uuid          PATH '$.incidentID' -- обратите внимание на регистр букв в JSON
+            ,related_org         text          PATH '$.relatedOrganization'
+            ,author_org          text          PATH '$.authorOrganization'
+            ,status              text          PATH '$.status'
+        )
+    ) d
+LOOP
+    -- 1. Вставляем сам инцидент в таблицу инцидентов (если такого ID еще нет)
+    INSERT INTO public.incidents (
+        incident_id,
+        related_organization,
+        author_organization,
+        status
+    ) VALUES (
+        dat_incident.incident_id,
+        -- Так как в JSON у вас была строка с кавычками, можно очистить её до массива или текста:
+        ARRAY[replace(replace(dat_incident.related_org, '"', ''), '[', ''), ']'], 
+        dat_incident.author_org,
+        dat_incident.status
+    )
+    ON CONFLICT (incident_id) DO NOTHING;
+
+    -- 2. СВЯЗЫВАЕМ СУБЪЕКТА И ИНЦИДЕНТ (Many-to-Many)
+    -- Используем v_id_JSON_TABLE (ID субъекта, как у вас в коде с телефонами)
+    INSERT INTO public.subject_incidents (
+        subject_id,
+        incident_id
+    ) VALUES (
+        v_id_JSON_TABLE,            -- ID текущего субъекта
+        dat_incident.incident_id    -- ID текущего инцидента из цикла
+    )
+    ON CONFLICT (subject_id, incident_id) DO NOTHING;
+
+END LOOP;
