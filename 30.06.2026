@@ -1,0 +1,365 @@
+-- 1. Справочник инцидентов (основная карточка)
+CREATE TABLE incidents (
+    id UUID PRIMARY KEY,
+    created_date TIMESTAMP WITH TIME ZONE,
+    incident_date TIMESTAMP WITH TIME ZONE, -- переименовано из 'date', т.к. 'date' зарезервировано
+    type VARCHAR(255),
+    amount NUMERIC(15, 2),
+    currency VARCHAR(50),
+    based_on VARCHAR(255),
+    priority VARCHAR(50),
+    is_author BOOLEAN,
+    fraud_type VARCHAR(500),
+    description TEXT,
+    source_author VARCHAR(255),
+    incident_status VARCHAR(100),
+    resolution_status VARCHAR(100),
+    source_organization VARCHAR(255),
+    created_by_organization VARCHAR(50),
+    is_created_by_government BOOLEAN,
+    
+    -- Финансовые метрики
+    amount_loss_own NUMERIC(15, 2),
+    currency_amount_loss_own VARCHAR(50),
+    amount_save_own NUMERIC(15, 2),
+    currency_amount_save_own VARCHAR(50),
+    amount_loss_credit NUMERIC(15, 2),
+    currency_amount_loss_credit VARCHAR(50),
+    amount_save_credit NUMERIC(15, 2),
+    currency_amount_save_credit VARCHAR(50),
+    is_innocent_status BOOLEAN,
+    
+    st_ins TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. Связанные организации (массив related)
+CREATE TABLE incident_related (
+    id_rec INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    organization_name VARCHAR(255),
+    UNIQUE(incident_id, organization_name)
+);
+
+-- 3. Резолюции инцидента (массив resolutions)
+CREATE TABLE incident_resolutions (
+    id UUID PRIMARY KEY,
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    status VARCHAR(100),
+    created_by VARCHAR(255),
+    created_date TIMESTAMP WITH TIME ZONE,
+    organization VARCHAR(255),
+    is_innocent_status BOOLEAN
+);
+
+-- 4. Участники транзакций (Универсальная таблица для Sender и Receiver)
+CREATE TABLE transaction_participants (
+    id UUID PRIMARY KEY,
+    identification_number VARCHAR(50), -- ИИН / БИН
+    type VARCHAR(50),                   -- PERSON / ORGANIZATION
+    incident_role VARCHAR(50),          -- SUSPECT / VICTIM
+    country VARCHAR(100),
+    
+    -- Блок Info
+    name VARCHAR(255),
+    surname VARCHAR(255),
+    patronymic VARCHAR(255),
+    gender VARCHAR(20),
+    origin_date DATE,
+    
+    -- Блок Кошелька (Wallet)
+    wallet_id UUID,
+    wallet_number VARCHAR(100),
+    wallet_issuer_bin VARCHAR(50),
+    
+    -- Блок Счета (Account)
+    account_id UUID,
+    account_iban VARCHAR(50),
+    account_status VARCHAR(50),
+    account_balance NUMERIC(15, 2),
+    account_currency VARCHAR(50),
+    is_foreign_account BOOLEAN,
+    
+    -- Блок Карты (Card Mask)
+    card_id UUID,
+    card_number VARCHAR(50),
+    card_issuer_bin VARCHAR(50),
+    
+    -- Блок Payment Point
+    payment_point_id UUID,
+    payment_point_number VARCHAR(50),
+    payment_point_address VARCHAR(255),
+    
+    -- Блок Телефона
+    phone_id UUID,
+    phone_number VARCHAR(50),
+    
+    -- Блок Иностранного счета
+    account_foreign_id UUID,
+    account_foreign_iban VARCHAR(50)
+);
+
+-- 5. Транзакции (Массив transactions)
+CREATE TABLE transactions (
+    id UUID PRIMARY KEY,
+    incident_id UUID REFERENCES incidents(id) ON DELETE CASCADE,
+    date TIMESTAMP WITH TIME ZONE,
+    type VARCHAR(255),
+    amount NUMERIC(15, 2),
+    currency VARCHAR(50),
+    status VARCHAR(100),
+    payment_id VARCHAR(50),
+    transaction_rrn VARCHAR(100),
+    is_deleted BOOLEAN,
+    
+    -- Внешние ключи на участников
+    sender_id UUID REFERENCES transaction_participants(id),
+    receiver_id UUID REFERENCES transaction_participants(id)
+);
+
+
+
+CREATE OR REPLACE PROCEDURE prc_parse_incident_array_by_id(p_id_rec INT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_json JSONB;
+    v_status INT;
+BEGIN
+    -- 1. Получаем JSON и текущий статус записи
+    SELECT json_, status 
+    INTO v_json, v_status
+    FROM JSON_LIST_incident 
+    WHERE id_rec = p_id_rec;
+
+    -- Проверяем, существует ли запись
+    IF v_json IS NULL THEN
+        RAISE NOTICE 'Запись с id_rec = % не найдена.', p_id_rec;
+        RETURN;
+    END IF;
+
+    -- Если запись уже обработана, выходим
+    IF v_status = 1 THEN
+        RAISE NOTICE 'Запись id_rec = % уже была успешно обработана.', p_id_rec;
+        RETURN;
+    END IF;
+
+    -- Начинаем разбор во вложенном блоке для отлова ошибок
+    BEGIN
+        
+        -- ШАГ 1: Вставка во все основные инциденты из массива
+        -- jsonb_array_elements(v_json) разворачивает массив на отдельные инциденты (inc)
+        INSERT INTO incidents (
+            id, created_date, incident_date, type, amount, currency, based_on, 
+            priority, is_author, fraud_type, description, source_author, 
+            incident_status, resolution_status, source_organization, 
+            created_by_organization, is_created_by_government,
+            amount_loss_own, currency_amount_loss_own, amount_save_own, currency_amount_save_own,
+            amount_loss_credit, currency_amount_loss_credit, amount_save_credit, currency_amount_save_credit,
+            is_innocent_status
+        )
+        SELECT 
+            (inc->>'id')::UUID,
+            (inc->>'created_date')::TIMESTAMP WITH TIME ZONE,
+            (inc->>'date')::TIMESTAMP WITH TIME ZONE,
+            inc->>'type',
+            (inc->>'amount')::NUMERIC,
+            inc->>'currency',
+            inc->>'based_on',
+            inc->>'priority',
+            (inc->>'is_author')::BOOLEAN,
+            inc->>'fraud_type',
+            inc->>'description',
+            inc->>'source_author',
+            inc->>'incidentStatus',
+            inc->>'resolutionStatus',
+            inc->>'source_organization',
+            inc->>'created_by_organization',
+            (inc->>'is_created_by_government')::BOOLEAN,
+            (inc->>'amount_loss_own')::NUMERIC,
+            inc->>'currency_amount_loss_own',
+            (inc->>'amount_save_own')::NUMERIC,
+            inc->>'currency_amount_save_own',
+            (inc->>'amount_loss_credit')::NUMERIC,
+            inc->>'currency_amount_loss_credit',
+            (inc->>'amount_save_credit')::NUMERIC,
+            inc->>'currency_amount_save_credit',
+            (inc->>'isInnocentStatus')::BOOLEAN
+        FROM jsonb_array_elements(v_json) AS inc
+        ON CONFLICT (id) DO UPDATE SET
+            incident_status = EXCLUDED.incident_status,
+            resolution_status = EXCLUDED.resolution_status;
+
+
+        -- ШАГ 2: Разбор вложенных массивов связанных организаций (related) для каждого инцидента
+        INSERT INTO incident_related (incident_id, organization_name)
+        SELECT 
+            (inc->>'id')::UUID,
+            org.value::text
+        FROM jsonb_array_elements(v_json) AS inc,
+        LATERAL jsonb_array_elements_text(inc->'related') AS org
+        ON CONFLICT DO NOTHING;
+
+
+        -- ШАГ 3: Разбор массивов резолюций (resolutions) для каждого инцидента
+        INSERT INTO incident_resolutions (
+            id, incident_id, status, created_by, created_date, organization, is_innocent_status
+        )
+        SELECT 
+            (res->>'id')::UUID,
+            (inc->>'id')::UUID,
+            res->>'status',
+            res->>'created_by',
+            (res->>'created_date')::TIMESTAMP WITH TIME ZONE,
+            res->>'organization',
+            (res->>'isInnocentStatus')::BOOLEAN
+        FROM jsonb_array_elements(v_json) AS inc,
+        LATERAL jsonb_array_elements(inc->'resolutions') AS res
+        ON CONFLICT (id) DO NOTHING;
+
+
+        -- ШАГ 4: Разбор участников транзакций (Отправители / SENDER) из всех инцидентов
+        INSERT INTO transaction_participants (
+            id, identification_number, type, incident_role, country,
+            name, surname, patronymic, gender, origin_date,
+            wallet_id, wallet_number, wallet_issuer_bin,
+            account_id, account_iban, account_status, account_balance, account_currency, is_foreign_account,
+            card_id, card_number, card_issuer_bin,
+            payment_point_id, payment_point_number, payment_point_address,
+            phone_id, phone_number,
+            account_foreign_id, account_foreign_iban
+        )
+        SELECT DISTINCT ON ((t->'sender'->>'id'))
+            (t->'sender'->>'id')::UUID,
+            t->'sender'->>'identification_number',
+            t->'sender'->>'type',
+            t->'sender'->>'incident_role',
+            t->'sender'->>'country',
+            t->'sender'->'info'->>'name',
+            t->'sender'->'info'->>'surname',
+            t->'sender'->'info'->>'patronymic',
+            t->'sender'->'info'->>'gender',
+            (t->'sender'->'info'->>'origin_date')::DATE,
+            (t->'sender'->'wallet'->>'id')::UUID,
+            t->'sender'->'wallet'->>'number',
+            t->'sender'->'wallet'->>'issuer_bin',
+            (t->'sender'->'account'->>'id')::UUID,
+            t->'sender'->'account'->>'iban',
+            t->'sender'->'account'->>'account_status',
+            (t->'sender'->'account'->>'account_balance')::NUMERIC,
+            t->'sender'->'account'->>'account_currency',
+            (t->'sender'->'account'->>'isForeignAccount')::BOOLEAN,
+            (t->'sender'->'card_mask'->>'id')::UUID,
+            t->'sender'->'card_mask'->>'card_number',
+            t->'sender'->'card_mask'->>'issuer_bin',
+            (t->'sender'->'paymentPoint'->>'id')::UUID,
+            t->'sender'->'paymentPoint'->>'number',
+            t->'sender'->'paymentPoint'->>'address',
+            (t->'sender'->'phone_number'->>'id')::UUID,
+            t->'sender'->'phone_number'->>'number',
+            (t->'sender'->'account_foreign'->>'id')::UUID,
+            t->'sender'->'account_foreign'->>'iban'
+        FROM jsonb_array_elements(v_json) AS inc,
+        LATERAL jsonb_array_elements(inc->'transactions') AS t
+        WHERE t->'sender'->>'id' IS NOT NULL
+        ON CONFLICT (id) DO NOTHING;
+
+
+        -- ШАГ 5: Разбор участников транзакций (Получатели / RECEIVER) из всех инцидентов
+        INSERT INTO transaction_participants (
+            id, identification_number, type, incident_role, country,
+            name, surname, patronymic, gender, origin_date,
+            wallet_id, wallet_number, wallet_issuer_bin,
+            account_id, account_iban, account_status, account_balance, account_currency, is_foreign_account,
+            card_id, card_number, card_issuer_bin,
+            payment_point_id, payment_point_number, payment_point_address,
+            phone_id, phone_number,
+            account_foreign_id, account_foreign_iban
+        )
+        SELECT DISTINCT ON ((t->'receiver'->>'id'))
+            (t->'receiver'->>'id')::UUID,
+            t->'receiver'->>'identification_number',
+            t->'receiver'->>'type',
+            t->'receiver'->>'incident_role',
+            t->'receiver'->>'country',
+            t->'receiver'->'info'->>'name',
+            t->'receiver'->'info'->>'surname',
+            t->'receiver'->'info'->>'patronymic',
+            t->'receiver'->'info'->>'gender',
+            (t->'receiver'->'info'->>'origin_date')::DATE,
+            (t->'receiver'->'wallet'->>'id')::UUID,
+            t->'receiver'->'wallet'->>'number',
+            t->'receiver'->'wallet'->>'issuer_bin',
+            (t->'receiver'->'account'->>'id')::UUID,
+            t->'receiver'->'account'->>'iban',
+            t->'receiver'->'account'->>'account_status',
+            (t->'receiver'->'account'->>'account_balance')::NUMERIC,
+            t->'receiver'->'account'->>'account_currency',
+            (t->'receiver'->'account'->>'isForeignAccount')::BOOLEAN,
+            (t->'receiver'->'card_mask'->>'id')::UUID,
+            t->'receiver'->'card_mask'->>'card_number',
+            t->'receiver'->'card_mask'->>'issuer_bin',
+            (t->'receiver'->'paymentPoint'->>'id')::UUID,
+            t->'receiver'->'paymentPoint'->>'number',
+            t->'receiver'->'paymentPoint'->>'address',
+            (t->'receiver'->'phone_number'->>'id')::UUID,
+            t->'receiver'->'phone_number'->>'number',
+            (t->'receiver'->'account_foreign'->>'id')::UUID,
+            t->'receiver'->'account_foreign'->>'iban'
+        FROM jsonb_array_elements(v_json) AS inc,
+        LATERAL jsonb_array_elements(inc->'transactions') AS t
+        WHERE t->'receiver'->>'id' IS NOT NULL
+        ON CONFLICT (id) DO NOTHING;
+
+
+        -- ШАГ 6: Разбор самих массивов транзакций (transactions) для каждого инцидента
+        INSERT INTO transactions (
+            id, incident_id, date, type, amount, currency, status, payment_id, transaction_rrn, is_deleted, sender_id, receiver_id
+        )
+        SELECT 
+            (t->>'id')::UUID,
+            (inc->>'id')::UUID,
+            (t->>'date')::TIMESTAMP WITH TIME ZONE,
+            t->>'type',
+            (t->>'amount')::NUMERIC,
+            t->>'currency',
+            t->>'status',
+            t->>'payment_id',
+            t->>'transaction_rrn',
+            (t->>'is_deleted')::BOOLEAN,
+            (t->'sender'->>'id')::UUID,
+            (t->'receiver'->>'id')::UUID
+        FROM jsonb_array_elements(v_json) AS inc,
+        LATERAL jsonb_array_elements(inc->'transactions') AS t
+        ON CONFLICT (id) DO NOTHING;
+
+
+        -- ШАГ 7: Фиксируем успешный статус обработки строки
+        UPDATE JSON_LIST_incident 
+        SET status = 1 
+        WHERE id_rec = p_id_rec;
+
+    EXCEPTION WHEN OTHERS THEN
+        -- В случае ошибки ставим статус -1
+        UPDATE JSON_LIST_incident 
+        SET status = -1 
+        WHERE id_rec = p_id_rec;
+        
+        RAISE WARNING 'Ошибка разбора пакета инцидентов в id_rec = %. Текст ошибки: %', p_id_rec, SQLERRM;
+    END;
+
+END;
+$$;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
