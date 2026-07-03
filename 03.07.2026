@@ -17,18 +17,21 @@ BEGIN
         RETURN;
     END IF;
 
-    -- Если запись уже обработана со статусом 1, но нам нужно уметь накатывать обновления,
-    -- это условие можно либо убрать, либо оставить, если «обновленные» строки залетают с обнуленным статусом (например, status = 0).
-    -- Оставляю как у вас, предполагая, что новые/обновленные пакеты приходят со статусом отличным от 1.
+    -- Если запись уже обработана со статусом 1, выходим (раз вы сбрасываете статус вручную, оставляем)
     IF v_status = 1 THEN
         RAISE NOTICE 'Запись id_rec = % уже была успешно обработана.', p_id_rec;
         RETURN;
     END IF;
 
+    -- РЕШЕНИЕ ПРОБЛЕМЫ: Если пришел объект {}, превращаем его в массив [{}]
+    IF jsonb_typeof(v_json) = 'object' THEN
+        v_json := jsonb_build_array(v_json);
+    END IF;
+
     -- Начинаем разбор во вложенном блоке для отлова ошибок
     BEGIN
         
-        -- ШАГ 1: Обновлено! Теперь обновляем ВСЕ значимые поля инцидента, если он пришел повторно.
+        -- ШАГ 1: Вставка / Обновление основных инцидентов
         INSERT INTO incidents (
             id, created_date, incident_date, type, amount, currency, based_on, 
             priority, is_author, fraud_type, description, source_author, 
@@ -69,7 +72,7 @@ BEGIN
         ON CONFLICT (id) DO UPDATE SET
             created_date = EXCLUDED.created_date,
             incident_date = EXCLUDED.incident_date,
-            type = EXCLUDED.type,
+            type = EXCLUDED.type,          -- Теперь "Дроппер" успешно обновится!
             amount = EXCLUDED.amount,
             currency = EXCLUDED.currency,
             based_on = EXCLUDED.based_on,
@@ -94,9 +97,7 @@ BEGIN
             is_innocent_status = EXCLUDED.is_innocent_status;
 
 
-        -- ШАГ 2: Связанные организации. 
-        -- Здесь обычно составной уникальный ключ (incident_id, organization_name). 
-        -- Если связь уже есть — обновлять нечего, поэтому оставляем DO NOTHING.
+        -- ШАГ 2: Связанные организации
         INSERT INTO incident_related (incident_id, organization_name)
         SELECT 
             (inc->>'id')::UUID,
@@ -106,8 +107,7 @@ BEGIN
         ON CONFLICT DO NOTHING; 
 
 
-        -- ШАГ 3: Обновлено! Разбор массивов резолюций.
-        -- Если у резолюции тот же id, обновляем её изменяемые поля.
+        -- ШАГ 3: Разбор массивов резолюций
         INSERT INTO incident_resolutions (
             id, incident_id, status, created_by, created_date, organization, is_innocent_status
         )
@@ -129,8 +129,7 @@ BEGIN
             is_innocent_status = EXCLUDED.is_innocent_status;
 
 
-        -- ШАГ 4: Обновлено! Отправители (SENDER).
-        -- Если данные участника (паспорт, телефон, аккаунт) изменились, обновляем их по его id.
+        -- ШАГ 4: Разбор участников транзакций (Отправители / SENDER)
         INSERT INTO transaction_participants (
             id, identification_number, type, incident_role, country,
             name, surname, patronymic, gender, origin_date,
@@ -205,8 +204,7 @@ BEGIN
             account_foreign_iban = EXCLUDED.account_foreign_iban;
 
 
-        -- ШАГ 5: Обновлено! Получатели (RECEIVER).
-        -- Точно такое же обновление полей на случай изменения информации о получателе.
+        -- ШАГ 5: Разбор участников транзакций (Получатели / RECEIVER)
         INSERT INTO transaction_participants (
             id, identification_number, type, incident_role, country,
             name, surname, patronymic, gender, origin_date,
@@ -281,8 +279,7 @@ BEGIN
             account_foreign_iban = EXCLUDED.account_foreign_iban;
 
 
-        -- ШАГ 6: Обновлено! Разбор самих массивов транзакций.
-        -- Обновляем статус, суммы или флаг удаления транзакции по её id.
+        -- ШАГ 6: Разбор самих массивов транзакций
         INSERT INTO transactions (
             id, incident_id, date, type, amount, currency, status, payment_id, transaction_rrn, is_deleted, sender_id, receiver_id
         )
