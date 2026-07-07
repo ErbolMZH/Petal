@@ -1,0 +1,313 @@
+CREATE OR REPLACE PROCEDURE prc_parse_incident_array_by_id(p_id_rec INT)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_json JSONB;
+    v_status INT;
+BEGIN
+    -- 1. Получаем JSON и текущий статус записи
+    SELECT json_, status 
+    INTO v_json, v_status
+    FROM JSON_LIST_incident 
+    WHERE id_rec = p_id_rec;
+
+    IF v_json IS NULL THEN
+        RAISE NOTICE 'Запись с id_rec = % не найдена.', p_id_rec;
+        RETURN;
+    END IF;
+
+    -- Если статус уже 1, но вам нужно иметь возможность обновлять данные при повторном вызове,
+    -- эту проверку можно закомментировать. Пока оставляем стандартное поведение.
+    IF v_status = 1 THEN
+        RAISE NOTICE 'Запись id_rec = % уже была успешно обработана.', p_id_rec;
+        RETURN;
+    END IF;
+
+    IF jsonb_typeof(v_json) = 'object' THEN
+        v_json := jsonb_build_array(v_json);
+    END IF;
+
+    -- === БЛОК EXCEPTION УБРАН ===
+    -- Все ошибки напрямую пробрасываются в Go-код для прозрачного логирования.
+
+    -- ШАГ 1: Вставка или безопасное обновление основных инцидентов
+    INSERT INTO incidents (
+        id, created_date, incident_date, type, amount, currency, based_on, 
+        priority, is_author, fraud_type, description, source_author, 
+        incident_status, resolution_status, source_organization, 
+        created_by_organization, is_created_by_government,
+        amount_loss_own, currency_amount_loss_own, amount_save_own, currency_amount_save_own,
+        amount_loss_credit, currency_amount_loss_credit, amount_save_credit, currency_amount_save_credit,
+        is_innocent_status
+    )
+    SELECT 
+        (inc->>'id')::UUID,
+        (inc->>'created_date')::TIMESTAMP WITH TIME ZONE,
+        (inc->>'date')::TIMESTAMP WITH TIME ZONE,
+        inc->>'type',
+        (inc->>'amount')::NUMERIC,
+        inc->>'currency',
+        inc->>'based_on',
+        inc->>'priority',
+        (inc->>'is_author')::BOOLEAN,
+        inc->>'fraud_type',
+        inc->>'description',
+        inc->>'source_author',
+        inc->>'incidentStatus',
+        inc->>'resolutionStatus',
+        inc->>'source_organization',
+        inc->>'created_by_organization',
+        (inc->>'is_created_by_government')::BOOLEAN,
+        (inc->>'amount_loss_own')::NUMERIC,
+        inc->>'currency_amount_loss_own',
+        (inc->>'amount_save_own')::NUMERIC,
+        inc->>'currency_amount_save_own',
+        (inc->>'amount_loss_credit')::NUMERIC,
+        inc->>'currency_amount_loss_credit',
+        (inc->>'amount_save_credit')::NUMERIC,
+        inc->>'currency_amount_save_credit',
+        (inc->>'isInnocentStatus')::BOOLEAN
+    FROM jsonb_array_elements(v_json) AS inc
+    ON CONFLICT (id) DO UPDATE SET
+        created_date               = COALESCE(EXCLUDED.created_date, incidents.created_date),
+        incident_date              = COALESCE(EXCLUDED.incident_date, incidents.incident_date),
+        type                       = COALESCE(EXCLUDED.type, incidents.type),
+        amount                     = COALESCE(EXCLUDED.amount, incidents.amount),
+        currency                   = COALESCE(EXCLUDED.currency, incidents.currency),
+        based_on                   = COALESCE(EXCLUDED.based_on, incidents.based_on),
+        priority                   = COALESCE(EXCLUDED.priority, incidents.priority),
+        is_author                  = COALESCE(EXCLUDED.is_author, incidents.is_author),
+        fraud_type                 = COALESCE(EXCLUDED.fraud_type, incidents.fraud_type),
+        description                = COALESCE(EXCLUDED.description, incidents.description),
+        source_author              = COALESCE(EXCLUDED.source_author, incidents.source_author),
+        incident_status            = COALESCE(EXCLUDED.incident_status, incidents.incident_status),
+        resolution_status          = COALESCE(EXCLUDED.resolution_status, incidents.resolution_status),
+        source_organization        = COALESCE(EXCLUDED.source_organization, incidents.source_organization),
+        created_by_organization    = COALESCE(EXCLUDED.created_by_organization, incidents.created_by_organization),
+        is_created_by_government   = COALESCE(EXCLUDED.is_created_by_government, incidents.is_created_by_government),
+        amount_loss_own            = COALESCE(EXCLUDED.amount_loss_own, incidents.amount_loss_own),
+        currency_amount_loss_own   = COALESCE(EXCLUDED.currency_amount_loss_own, incidents.currency_amount_loss_own),
+        amount_save_own            = COALESCE(EXCLUDED.amount_save_own, incidents.amount_save_own),
+        currency_amount_save_own   = COALESCE(EXCLUDED.currency_amount_save_own, incidents.currency_amount_save_own),
+        amount_loss_credit         = COALESCE(EXCLUDED.amount_loss_credit, incidents.amount_loss_credit),
+        currency_amount_loss_credit = COALESCE(EXCLUDED.currency_amount_loss_credit, incidents.currency_amount_loss_credit),
+        amount_save_credit         = COALESCE(EXCLUDED.amount_save_credit, incidents.amount_save_credit),
+        currency_amount_save_credit = COALESCE(EXCLUDED.currency_amount_save_credit, incidents.currency_amount_save_credit),
+        is_innocent_status         = COALESCE(EXCLUDED.is_innocent_status, incidents.is_innocent_status);
+
+    -- ШАГ 2: Связанные организации (Связи уникальны, дубли просто пропускаем)
+    INSERT INTO incident_related (incident_id, organization_name)
+    SELECT 
+        (inc->>'id')::UUID,
+        org.value::text
+    FROM jsonb_array_elements(v_json) AS inc,
+    LATERAL jsonb_array_elements_text(inc->'related') AS org
+    ON CONFLICT DO NOTHING;
+
+    -- ШАГ 3: Безопасное обновление массивов резолюций
+    INSERT INTO incident_resolutions (
+        id, incident_id, status, created_by, created_date, organization, is_innocent_status
+    )
+    SELECT 
+        (res->>'id')::UUID,
+        (inc->>'id')::UUID,
+        res->>'status',
+        res->>'created_by',
+        (res->>'created_date')::TIMESTAMP WITH TIME ZONE,
+        res->>'organization',
+        (res->>'isInnocentStatus')::BOOLEAN
+    FROM jsonb_array_elements(v_json) AS inc,
+    LATERAL jsonb_array_elements(inc->'resolutions') AS res
+    ON CONFLICT (id) DO UPDATE SET
+        status             = COALESCE(EXCLUDED.status, incident_resolutions.status),
+        created_by         = COALESCE(EXCLUDED.created_by, incident_resolutions.created_by),
+        created_date       = COALESCE(EXCLUDED.created_date, incident_resolutions.created_date),
+        organization       = COALESCE(EXCLUDED.organization, incident_resolutions.organization),
+        is_innocent_status = COALESCE(EXCLUDED.is_innocent_status, incident_resolutions.is_innocent_status);
+
+    -- ШАГ 4: Участники транзакций (Отправители / SENDER) - Обновляет только пришедшие поля
+    INSERT INTO transaction_participants (
+        id, identification_number, type, incident_role, country,
+        name, surname, patronymic, gender, origin_date,
+        wallet_id, wallet_number, wallet_issuer_bin,
+        account_id, account_iban, account_status, account_balance, account_currency, is_foreign_account,
+        card_id, card_number, card_issuer_bin,
+        payment_point_id, payment_point_number, payment_point_address,
+        phone_id, phone_number,
+        account_foreign_id, account_foreign_iban
+    )
+    SELECT DISTINCT ON ((t->'sender'->>'id'))
+        (t->'sender'->>'id')::UUID,
+        t->'sender'->>'identification_number',
+        t->'sender'->>'type',
+        t->'sender'->>'incident_role',
+        t->'sender'->>'country',
+        t->'sender'->'info'->>'name',
+        t->'sender'->'info'->>'surname',
+        t->'sender'->'info'->>'patronymic',
+        t->'sender'->'info'->>'gender',
+        (t->'sender'->'info'->>'origin_date')::DATE,
+        (t->'sender'->'wallet'->>'id')::UUID,
+        t->'sender'->'wallet'->>'number',
+        t->'sender'->'wallet'->>'issuer_bin',
+        (t->'sender'->'account'->>'id')::UUID,
+        t->'sender'->'account'->>'iban',
+        t->'sender'->'account'->>'account_status',
+        (t->'sender'->'account'->>'account_balance')::NUMERIC,
+        t->'sender'->'account'->>'account_currency',
+        (t->'sender'->'account'->>'isForeignAccount')::BOOLEAN,
+        (t->'sender'->'card_mask'->>'id')::UUID,
+        t->'sender'->'card_mask'->>'card_number',
+        t->'sender'->'card_mask'->>'issuer_bin',
+        (t->'sender'->'paymentPoint'->>'id')::UUID,
+        t->'sender'->'paymentPoint'->>'number',
+        t->'sender'->'paymentPoint'->>'address',
+        (t->'sender'->'phone_number'->>'id')::UUID,
+        t->'sender'->'phone_number'->>'number',
+        (t->'sender'->'account_foreign'->>'id')::UUID,
+        t->'sender'->'account_foreign'->>'iban'
+    FROM jsonb_array_elements(v_json) AS inc,
+    LATERAL jsonb_array_elements(inc->'transactions') AS t
+    WHERE t->'sender'->>'id' IS NOT NULL
+    ON CONFLICT (id) DO UPDATE SET
+        identification_number = COALESCE(EXCLUDED.identification_number, transaction_participants.identification_number),
+        type                  = COALESCE(EXCLUDED.type, transaction_participants.type),
+        incident_role         = COALESCE(EXCLUDED.incident_role, transaction_participants.incident_role),
+        country               = COALESCE(EXCLUDED.country, transaction_participants.country),
+        name                  = COALESCE(EXCLUDED.name, transaction_participants.name),
+        surname               = COALESCE(EXCLUDED.surname, transaction_participants.surname), -- Обновится точечно
+        patronymic            = COALESCE(EXCLUDED.patronymic, transaction_participants.patronymic),
+        gender                = COALESCE(EXCLUDED.gender, transaction_participants.gender),
+        origin_date           = COALESCE(EXCLUDED.origin_date, transaction_participants.origin_date),
+        wallet_id             = COALESCE(EXCLUDED.wallet_id, transaction_participants.wallet_id),
+        wallet_number         = COALESCE(EXCLUDED.wallet_number, transaction_participants.wallet_number),
+        wallet_issuer_bin     = COALESCE(EXCLUDED.wallet_issuer_bin, transaction_participants.wallet_issuer_bin),
+        account_id            = COALESCE(EXCLUDED.account_id, transaction_participants.account_id),
+        account_iban          = COALESCE(EXCLUDED.account_iban, transaction_participants.account_iban),
+        account_status        = COALESCE(EXCLUDED.account_status, transaction_participants.account_status),
+        account_balance       = COALESCE(EXCLUDED.account_balance, transaction_participants.account_balance),
+        account_currency      = COALESCE(EXCLUDED.account_currency, transaction_participants.account_currency),
+        is_foreign_account    = COALESCE(EXCLUDED.is_foreign_account, transaction_participants.is_foreign_account),
+        card_id               = COALESCE(EXCLUDED.card_id, transaction_participants.card_id),
+        card_number           = COALESCE(EXCLUDED.card_number, transaction_participants.card_number),
+        card_issuer_bin       = COALESCE(EXCLUDED.card_issuer_bin, transaction_participants.card_issuer_bin),
+        payment_point_id      = COALESCE(EXCLUDED.payment_point_id, transaction_participants.payment_point_id),
+        payment_point_number  = COALESCE(EXCLUDED.payment_point_number, transaction_participants.payment_point_number),
+        payment_point_address = COALESCE(EXCLUDED.payment_point_address, transaction_participants.payment_point_address),
+        phone_id              = COALESCE(EXCLUDED.phone_id, transaction_participants.phone_id),
+        phone_number          = COALESCE(EXCLUDED.phone_number, transaction_participants.phone_number),
+        account_foreign_id    = COALESCE(EXCLUDED.account_foreign_id, transaction_participants.account_foreign_id),
+        account_foreign_iban  = COALESCE(EXCLUDED.account_foreign_iban, transaction_participants.account_foreign_iban);
+
+    -- ШАГ 5: Участники транзакций (Получатели / RECEIVER) - Обновляет только пришедшие поля
+    INSERT INTO transaction_participants (
+        id, identification_number, type, incident_role, country,
+        name, surname, patronymic, gender, origin_date,
+        wallet_id, wallet_number, wallet_issuer_bin,
+        account_id, account_iban, account_status, account_balance, account_currency, is_foreign_account,
+        card_id, card_number, card_issuer_bin,
+        payment_point_id, payment_point_number, payment_point_address,
+        phone_id, phone_number,
+        account_foreign_id, account_foreign_iban
+    )
+    SELECT DISTINCT ON ((t->'receiver'->>'id'))
+        (t->'receiver'->>'id')::UUID,
+        t->'receiver'->>'identification_number',
+        t->'receiver'->>'type',
+        t->'receiver'->>'incident_role',
+        t->'receiver'->>'country',
+        t->'receiver'->'info'->>'name',
+        t->'receiver'->'info'->>'surname',
+        t->'receiver'->'info'->>'patronymic',
+        t->'receiver'->'info'->>'gender',
+        (t->'receiver'->'info'->>'origin_date')::DATE,
+        (t->'receiver'->'wallet'->>'id')::UUID,
+        t->'receiver'->'wallet'->>'number',
+        t->'receiver'->'wallet'->>'issuer_bin',
+        (t->'receiver'->'account'->>'id')::UUID,
+        t->'receiver'->'account'->>'iban',
+        t->'receiver'->'account'->>'account_status',
+        (t->'receiver'->'account'->>'account_balance')::NUMERIC,
+        t->'receiver'->'account'->>'account_currency',
+        (t->'receiver'->'account'->>'isForeignAccount')::BOOLEAN,
+        (t->'receiver'->'card_mask'->>'id')::UUID,
+        t->'receiver'->'card_mask'->>'card_number',
+        t->'receiver'->'card_mask'->>'issuer_bin',
+        (t->'receiver'->'paymentPoint'->>'id')::UUID,
+        t->'receiver'->'paymentPoint'->>'number',
+        t->'receiver'->'paymentPoint'->>'address',
+        (t->'receiver'->'phone_number'->>'id')::UUID,
+        t->'receiver'->'phone_number'->>'number',
+        (t->'receiver'->'account_foreign'->>'id')::UUID,
+        t->'receiver'->'account_foreign'->>'iban'
+    FROM jsonb_array_elements(v_json) AS inc,
+    LATERAL jsonb_array_elements(inc->'transactions') AS t
+    WHERE t->'receiver'->>'id' IS NOT NULL
+    ON CONFLICT (id) DO UPDATE SET
+        identification_number = COALESCE(EXCLUDED.identification_number, transaction_participants.identification_number),
+        type                  = COALESCE(EXCLUDED.type, transaction_participants.type),
+        incident_role         = COALESCE(EXCLUDED.incident_role, transaction_participants.incident_role),
+        country               = COALESCE(EXCLUDED.country, transaction_participants.country),
+        name                  = COALESCE(EXCLUDED.name, transaction_participants.name),
+        surname               = COALESCE(EXCLUDED.surname, transaction_participants.surname),
+        patronymic            = COALESCE(EXCLUDED.patronymic, transaction_participants.patronymic),
+        gender                = COALESCE(EXCLUDED.gender, transaction_participants.gender),
+        origin_date           = COALESCE(EXCLUDED.origin_date, transaction_participants.origin_date),
+        wallet_id             = COALESCE(EXCLUDED.wallet_id, transaction_participants.wallet_id),
+        wallet_number         = COALESCE(EXCLUDED.wallet_number, transaction_participants.wallet_number),
+        wallet_issuer_bin     = COALESCE(EXCLUDED.wallet_issuer_bin, transaction_participants.wallet_issuer_bin),
+        account_id            = COALESCE(EXCLUDED.account_id, transaction_participants.account_id),
+        account_iban          = COALESCE(EXCLUDED.account_iban, transaction_participants.account_iban),
+        account_status        = COALESCE(EXCLUDED.account_status, transaction_participants.account_status),
+        account_balance       = COALESCE(EXCLUDED.account_balance, transaction_participants.account_balance),
+        account_currency      = COALESCE(EXCLUDED.account_currency, transaction_participants.account_currency),
+        is_foreign_account    = COALESCE(EXCLUDED.is_foreign_account, transaction_participants.is_foreign_account),
+        card_id               = COALESCE(EXCLUDED.card_id, transaction_participants.card_id),
+        card_number           = COALESCE(EXCLUDED.card_number, transaction_participants.card_number),
+        card_issuer_bin       = COALESCE(EXCLUDED.card_issuer_bin, transaction_participants.card_issuer_bin),
+        payment_point_id      = COALESCE(EXCLUDED.payment_point_id, transaction_participants.payment_point_id),
+        payment_point_number  = COALESCE(EXCLUDED.payment_point_number, transaction_participants.payment_point_number),
+        payment_point_address = COALESCE(EXCLUDED.payment_point_address, transaction_participants.payment_point_address),
+        phone_id              = COALESCE(EXCLUDED.phone_id, transaction_participants.phone_id),
+        phone_number          = COALESCE(EXCLUDED.phone_number, transaction_participants.phone_number),
+        account_foreign_id    = COALESCE(EXCLUDED.account_foreign_id, transaction_participants.account_foreign_id),
+        account_foreign_iban  = COALESCE(EXCLUDED.account_foreign_iban, transaction_participants.account_foreign_iban);
+
+    -- ШАГ 6: Безопасное обновление транзакций
+    INSERT INTO transactions (
+        id, incident_id, date, type, amount, currency, status, payment_id, transaction_rrn, is_deleted, sender_id, receiver_id
+    )
+    SELECT 
+        (t->>'id')::UUID,
+        (inc->>'id')::UUID,
+        (t->>'date')::TIMESTAMP WITH TIME ZONE,
+        t->>'type',
+        (t->>'amount')::NUMERIC,
+        t->>'currency',
+        t->>'status',
+        t->>'payment_id',
+        t->>'transaction_rrn',
+        (t->>'is_deleted')::BOOLEAN,
+        (t->'sender'->>'id')::UUID,
+        (t->'receiver'->>'id')::UUID
+    FROM jsonb_array_elements(v_json) AS inc,
+    LATERAL jsonb_array_elements(inc->'transactions') AS t
+    ON CONFLICT (id) DO UPDATE SET
+        date            = COALESCE(EXCLUDED.date, transactions.date),
+        type            = COALESCE(EXCLUDED.type, transactions.type),
+        amount          = COALESCE(EXCLUDED.amount, transactions.amount),
+        currency        = COALESCE(EXCLUDED.currency, transactions.currency),
+        status          = COALESCE(EXCLUDED.status, transactions.status),
+        payment_id      = COALESCE(EXCLUDED.payment_id, transactions.payment_id),
+        transaction_rrn = COALESCE(EXCLUDED.transaction_rrn, transactions.transaction_rrn),
+        is_deleted      = COALESCE(EXCLUDED.is_deleted, transactions.is_deleted),
+        sender_id       = COALESCE(EXCLUDED.sender_id, transactions.sender_id),
+        receiver_id     = COALESCE(EXCLUDED.receiver_id, transactions.receiver_id);
+
+    -- ШАГ 7: Обновляем статус строки в стейджинге на Успешно (1)
+    UPDATE JSON_LIST_incident 
+    SET status = 1 
+    WHERE id_rec = p_id_rec;
+
+END;
+$$;
