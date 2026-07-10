@@ -15,11 +15,35 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     WITH updated_rows AS (
+        -- 1. Сначала меняем статус на 3 у нужных строк
         UPDATE inquiries_json
         SET status = 3
         WHERE status = 1
         RETURNING json_
+    ),
+    parsed_data AS (
+        -- 2. Распаковываем весь JSON во временный набор данных
+        SELECT 
+            (inquiry_item.value -> 'inquiry' ->> 'id')::UUID AS inquiry_id,
+            inquiry_item.value -> 'inquiry' -> 'sender' ->> 'bin' AS sender_bin,
+            inquiry_item.value -> 'inquiry' -> 'sender' ->> 'email' AS sender_email,
+            (inquiry_item.value -> 'inquiry' ->> 'isUnread')::BOOLEAN AS is_unread,
+            inquiry_item.value -> 'inquiry' -> 'receiver' ->> 'bin' AS receiver_bin,
+            (inquiry_item.value -> 'inquiry' ->> 'createdDate')::TIMESTAMP WITH TIME ZONE AS created_date,
+            inquiry_item.value -> 'inquiry' -> 'additionalData' ->> 'description' AS description,
+            inquiry_item.value -> 'inquiry' -> 'additionalData' -> 'attachments' AS attachments,
+            (batch.value ->> 'createdDate')::DATE AS batch_created_date,
+            -- Нумеруем строки с одинаковым inquiry_id, сортируя по дате (свежие будут первыми)
+            ROW_NUMBER() OVER (
+                PARTITION BY (inquiry_item.value -> 'inquiry' ->> 'id') 
+                ORDER BY (inquiry_item.value -> 'inquiry' ->> 'createdDate')::TIMESTAMP WITH TIME ZONE DESC
+            ) as rn
+        FROM 
+            updated_rows ur,
+            LATERAL jsonb_array_elements(ur.json_) AS batch,
+            LATERAL jsonb_array_elements(batch.value -> 'items') AS inquiry_item
     )
+    -- 3. Вставляем только уникальные строки (где rn = 1)
     INSERT INTO inquiries (
         inquiry_id,
         sender_bin,
@@ -30,22 +54,19 @@ BEGIN
         description,
         attachments,
         batch_created_date
-        -- Колонку dt_ins сюда не пишем, сработает DEFAULT NOW()
     )
     SELECT 
-        (inquiry_item.value -> 'inquiry' ->> 'id')::UUID AS inquiry_id,
-        inquiry_item.value -> 'inquiry' -> 'sender' ->> 'bin' AS sender_bin,
-        inquiry_item.value -> 'inquiry' -> 'sender' ->> 'email' AS sender_email,
-        (inquiry_item.value -> 'inquiry' ->> 'isUnread')::BOOLEAN AS is_unread,
-        inquiry_item.value -> 'inquiry' -> 'receiver' ->> 'bin' AS receiver_bin,
-        (inquiry_item.value -> 'inquiry' ->> 'createdDate')::TIMESTAMP WITH TIME ZONE AS created_date,
-        inquiry_item.value -> 'inquiry' -> 'additionalData' ->> 'description' AS description,
-        inquiry_item.value -> 'inquiry' -> 'additionalData' -> 'attachments' AS attachments,
-        (batch.value ->> 'createdDate')::DATE AS batch_created_date
-    FROM 
-        updated_rows ur,
-        LATERAL jsonb_array_elements(ur.json_) AS batch,
-        LATERAL jsonb_array_elements(batch.value -> 'items') AS inquiry_item
+        inquiry_id,
+        sender_bin,
+        sender_email,
+        is_unread,
+        receiver_bin,
+        created_date,
+        description,
+        attachments,
+        batch_created_date
+    FROM parsed_data
+    WHERE rn = 1 -- Отсекаем дубликаты внутри текущей пачки
     ON CONFLICT (inquiry_id) DO UPDATE SET
         sender_bin = EXCLUDED.sender_bin,
         sender_email = EXCLUDED.sender_email,
@@ -55,7 +76,7 @@ BEGIN
         description = EXCLUDED.description,
         attachments = EXCLUDED.attachments,
         batch_created_date = EXCLUDED.batch_created_date,
-        dt_ins = NOW(); -- Обновляем время на текущее, если запись уже существовала
+        dt_ins = NOW(); -- Обновляем время модификации
 
     COMMIT;
 END;
