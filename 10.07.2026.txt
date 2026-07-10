@@ -1,0 +1,63 @@
+CREATE TABLE IF NOT EXISTS inquiries (
+    inquiry_id UUID PRIMARY KEY,
+    sender_bin VARCHAR(12),
+    sender_email VARCHAR(255),
+    is_unread BOOLEAN,
+    receiver_bin VARCHAR(12),
+    created_date TIMESTAMP WITH TIME ZONE,
+    description TEXT,
+    attachments JSONB, -- Храним вложения в JSONB, чтобы не усложнять структуру
+    batch_created_date DATE -- Дата создания самого батча (из корня JSON)
+);
+
+CREATE OR REPLACE PROCEDURE sync_inquiries_json()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Используем CTE: сначала обновляем статус на 3 и возвращаем измененные строки
+    -- Это гарантирует, что мы обработаем только те строки, у которых на момент старта был status = 1
+    WITH updated_rows AS (
+        UPDATE inquiries_json
+        SET status = 3
+        WHERE status = 1
+        RETURNING json_  -- возвращаем саму колонку с JSON для последующего разбора
+    )
+    -- Теперь разбираем полученный JSON и вставляем данные в целевую таблицу
+    INSERT INTO inquiries (
+        inquiry_id,
+        sender_bin,
+        sender_email,
+        is_unread,
+        receiver_bin,
+        created_date,
+        description,
+        attachments,
+        batch_created_date
+    )
+    SELECT 
+        (inquiry_item.value -> 'inquiry' ->> 'id')::UUID AS inquiry_id,
+        inquiry_item.value -> 'inquiry' -> 'sender' ->> 'bin' AS sender_bin,
+        inquiry_item.value -> 'inquiry' -> 'sender' ->> 'email' AS sender_email,
+        (inquiry_item.value -> 'inquiry' ->> 'isUnread')::BOOLEAN AS is_unread,
+        inquiry_item.value -> 'inquiry' -> 'receiver' ->> 'bin' AS receiver_bin,
+        (inquiry_item.value -> 'inquiry' ->> 'createdDate')::TIMESTAMP WITH TIME ZONE AS created_date,
+        inquiry_item.value -> 'inquiry' -> 'additionalData' ->> 'description' AS description,
+        inquiry_item.value -> 'inquiry' -> 'additionalData' -> 'attachments' AS attachments,
+        (batch.value ->> 'createdDate')::DATE AS batch_created_date
+    FROM 
+        updated_rows ur, -- берём данные только из обновленных строк
+        LATERAL jsonb_array_elements(ur.json_) AS batch,
+        LATERAL jsonb_array_elements(batch.value -> 'items') AS inquiry_item
+    ON CONFLICT (inquiry_id) DO UPDATE SET
+        sender_bin = EXCLUDED.sender_bin,
+        sender_email = EXCLUDED.sender_email,
+        is_unread = EXCLUDED.is_unread,
+        receiver_bin = EXCLUDED.receiver_bin,
+        created_date = EXCLUDED.created_date,
+        description = EXCLUDED.description,
+        attachments = EXCLUDED.attachments,
+        batch_created_date = EXCLUDED.batch_created_date;
+
+    COMMIT;
+END;
+$$;
