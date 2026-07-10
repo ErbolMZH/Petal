@@ -14,15 +14,12 @@ CREATE OR REPLACE PROCEDURE sync_inquiries_json()
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    -- Используем CTE: сначала обновляем статус на 3 и возвращаем измененные строки
-    -- Это гарантирует, что мы обработаем только те строки, у которых на момент старта был status = 1
     WITH updated_rows AS (
         UPDATE inquiries_json
         SET status = 3
         WHERE status = 1
-        RETURNING json_  -- возвращаем саму колонку с JSON для последующего разбора
+        RETURNING json_
     )
-    -- Теперь разбираем полученный JSON и вставляем данные в целевую таблицу
     INSERT INTO inquiries (
         inquiry_id,
         sender_bin,
@@ -33,6 +30,7 @@ BEGIN
         description,
         attachments,
         batch_created_date
+        -- Колонку dt_ins сюда не пишем, сработает DEFAULT NOW()
     )
     SELECT 
         (inquiry_item.value -> 'inquiry' ->> 'id')::UUID AS inquiry_id,
@@ -45,7 +43,7 @@ BEGIN
         inquiry_item.value -> 'inquiry' -> 'additionalData' -> 'attachments' AS attachments,
         (batch.value ->> 'createdDate')::DATE AS batch_created_date
     FROM 
-        updated_rows ur, -- берём данные только из обновленных строк
+        updated_rows ur,
         LATERAL jsonb_array_elements(ur.json_) AS batch,
         LATERAL jsonb_array_elements(batch.value -> 'items') AS inquiry_item
     ON CONFLICT (inquiry_id) DO UPDATE SET
@@ -56,7 +54,8 @@ BEGIN
         created_date = EXCLUDED.created_date,
         description = EXCLUDED.description,
         attachments = EXCLUDED.attachments,
-        batch_created_date = EXCLUDED.batch_created_date;
+        batch_created_date = EXCLUDED.batch_created_date,
+        dt_ins = NOW(); -- Обновляем время на текущее, если запись уже существовала
 
     COMMIT;
 END;
