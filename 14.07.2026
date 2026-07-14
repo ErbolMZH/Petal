@@ -1,0 +1,271 @@
+package model
+
+import (
+	"database/sql"
+	"errors"
+	"log"
+)
+
+// GetIncidentByID выбирает инцидент со всеми связями (Related и Transactions) из БД
+func GetIncidentByID(id string) (AFIncidentInfoModel, error) {
+	var incident AFIncidentInfoModel
+
+	// 1. Получаем основную информацию об инциденте из incidents1
+	queryIncident := `
+		SELECT 
+			id, 
+			incident_date AS idate, -- в процедуре это поле называется incident_date
+			created_date AS created_at, 
+			resolution_status AS status, -- в процедуре resolution_status, в структуре db:"status"
+			fraud_type, 
+			description, 
+			amount, 
+			currency, 
+			source_author, 
+			source_organization, 
+			based_on, 
+			is_author, 
+			restricted
+		FROM incidents1 
+		WHERE id = $1 
+		LIMIT 1
+	`
+
+	// pg.DB().Get заполнит базовые поля структуры
+	err := pg.DB().Get(&incident, queryIncident, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return incident, errors.New("incident not found")
+		}
+		return incident, err
+	}
+
+	// 2. Получаем связанные организации (Related)
+	queryRelated := `
+		SELECT organization_name 
+		FROM incident_related 
+		WHERE incident_id = $1
+	`
+	var related []string
+	err = pg.DB().Select(&related, queryRelated, id)
+	if err != nil {
+		log.Printf("GetIncidentByID > error fetching related organizations: %s", err)
+	} else {
+		incident.Related = related
+	}
+
+	// 3. Получаем список транзакций для этого инцидента
+	queryTransactions := `
+		SELECT 
+			id, 
+			date, 
+			type, 
+			status, 
+			amount, 
+			currency, 
+			transaction_rrn,
+			sender_id,
+			receiver_id
+		FROM transactions 
+		WHERE incident_id = $1 AND (is_deleted IS DISTINCT FROM TRUE)
+	`
+
+	// Временная структура для сканирования транзакций из БД (с ID отправителя и получателя)
+	type DBTransaction struct {
+		ID             string `db:"id"`
+		Date           string `db:"date"`
+		Type           string `db:"type"`
+		Status         string `db:"status"`
+		Amount         int    `db:"amount"`
+		Currency       string `db:"currency"`
+		TransactionRrn string `db:"transaction_rrn"`
+		SenderID       string `db:"sender_id"`
+		ReceiverID     string `db:"receiver_id"`
+	}
+
+	var dbTxList []DBTransaction
+	err = pg.DB().Select(&dbTxList, queryTransactions, id)
+	if err != nil {
+		log.Printf("GetIncidentByID > error fetching transactions: %s", err)
+		return incident, nil // Возвращаем инцидент хотя бы без транзакций, если они упали
+	}
+
+	if len(dbTxList) == 0 {
+		return incident, nil
+	}
+
+	// Собираем все уникальные ID участников, чтобы вытащить их данные одним запросом
+	participantIDs := make([]string, 0)
+	for _, tx := range dbTxList {
+		if tx.SenderID != "" {
+			participantIDs = append(participantIDs, tx.SenderID)
+		}
+		if tx.ReceiverID != "" {
+			participantIDs = append(participantIDs, tx.ReceiverID)
+		}
+	}
+
+	// Загружаем данные участников
+	participantsMap := make(map[string]AFParticipantModel)
+	if len(participantIDs) > 0 {
+		participantsMap, err = getParticipantsByIDs(participantIDs)
+		if err != nil {
+			log.Printf("GetIncidentByID > error fetching participants: %s", err)
+		}
+	}
+
+	// 4. Маппим данные обратно в структуру транзакций Go
+	incident.Transactions = make([]AFTransactionModel, 0, len(dbTxList))
+	for _, tx := range dbTxList {
+		apiTx := AFTransactionModel{
+			ID:             tx.ID,
+			Date:           tx.Date,
+			Type:           tx.Type,
+			Status:         tx.Status,
+			Amount:         tx.Amount,
+			Currency:       tx.Currency,
+			TransactionRrn: tx.TransactionRrn,
+		}
+
+		if sender, ok := participantsMap[tx.SenderID]; ok {
+			apiTx.Sender = sender
+		}
+		if receiver, ok := participantsMap[tx.ReceiverID]; ok {
+			apiTx.Receiver = receiver
+		}
+
+		incident.Transactions = append(incident.Transactions, apiTx)
+	}
+
+	return incident, nil
+}
+
+// Вспомогательная функция для получения участников транзакции
+func getParticipantsByIDs(ids []string) (map[string]AFParticipantModel, error) {
+	result := make(map[string]AFParticipantModel)
+
+	// sqlx.In позволяет удобно сделать запрос WHERE id IN (...)
+	query := `
+		SELECT 
+			id,
+			type,
+			incident_role,
+			identification_number AS identical_number, -- маппинг на структуру
+			country,
+			
+			-- Поля для Info (AFPartyInfoModel)
+			name,
+			surname,
+			patronymic,
+			gender,
+			origin_date,
+			
+			-- Поля для CardMask (AFCardModel)
+			card_id,
+			card_number,
+			card_issuer_bin,
+			
+			-- Поля для Account (AFIBANModel)
+			account_id,
+			account_iban,
+			account_status,
+			account_balance,
+			account_currency,
+			is_foreign_account,
+			
+			-- Поля для PhoneNumber (AFPhoneNumberModel)
+			phone_id,
+			phone_number
+		FROM transaction_participants
+		WHERE id IN (?)
+	`
+
+	query, args, err := sqlx.In(query, ids)
+	if err != nil {
+		return result, err
+	}
+	query = pg.DB().Rebind(query)
+
+	// Временная плоская структура для сканирования строки БД
+	type FlatParticipant struct {
+		ID                string         `db:"id"`
+		Type              string         `db:"type"`
+		IncidentRole      string         `db:"incident_role"`
+		IdenticalNumber   sql.NullString `db:"identical_number"`
+		Country           sql.NullString `db:"country"`
+		// Info
+		Name              sql.NullString `db:"name"`
+		Surname           sql.NullString `db:"surname"`
+		Patronymic        sql.NullString `db:"patronymic"`
+		Gender            sql.NullString `db:"gender"`
+		OriginDate        sql.NullString `db:"origin_date"`
+		// Card
+		CardID            sql.NullString `db:"card_id"`
+		CardNumber        sql.NullString `db:"card_number"`
+		CardIssuerBin     sql.NullString `db:"card_issuer_bin"`
+		// Account
+		AccountID         sql.NullString `db:"account_id"`
+		AccountIban       sql.NullString `db:"account_iban"`
+		AccountStatus     sql.NullString `db:"account_status"`
+		AccountBalance    sql.NullFloat64`db:"account_balance"`
+		AccountCurrency   sql.NullString `db:"account_currency"`
+		IsForeignAccount  sql.NullBool   `db:"is_foreign_account"`
+		// Phone
+		PhoneID           sql.NullString `db:"phone_id"`
+		PhoneNumber       sql.NullString `db:"phone_number"`
+	}
+
+	var rows []FlatParticipant
+	err = pg.DB().Select(&rows, query, args...)
+	if err != nil {
+		return result, err
+	}
+
+	// Переносим плоские данные в древовидную структуру Go моделей
+	for _, r := range rows {
+		p := AFParticipantModel{
+			ID:              r.ID,
+			Type:            r.Type,
+			IncidentRole:    r.IncidentRole,
+			IdenticalNumber: r.IdenticalNumber.String,
+			Country:         r.Country.String,
+			Info: AFPartyInfoModel{
+				Name:       r.Name.String,
+				Surname:    r.Surname.String,
+				Patronymic: r.Patronymic.String,
+				Gender:     r.Gender.String,
+				OriginDate: r.OriginDate.String,
+			},
+		}
+
+		if r.CardID.Valid && r.CardID.String != "" {
+			p.CardMask = AFCardModel{
+				ID:         r.CardID.String,
+				CardNumber: r.CardNumber.String,
+				IssuerBin:  r.CardIssuerBin.String,
+			}
+		}
+
+		if r.AccountID.Valid && r.AccountID.String != "" {
+			p.Account = AFIBANModel{
+				ID:               r.AccountID.String,
+				Iban:             r.AccountIban.String,
+				AccountStatus:    r.AccountStatus.String,
+				AccountBalance:   decimal.NewFromFloat(r.AccountBalance.Float64), // предполагая использование decimal.Decimal
+				AccountCurrency:  r.AccountCurrency.String,
+				IsForeignAccount: r.IsForeignAccount.Bool,
+			}
+		}
+
+		if r.PhoneID.Valid && r.PhoneID.String != "" {
+			p.PhoneNumber = AFPhoneNumberModel{
+				ID:     r.PhoneID.String,
+				Number: r.PhoneNumber.String,
+			}
+		}
+
+		result[r.ID] = p
+	}
+
+	return result, nil
+}
