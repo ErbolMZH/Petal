@@ -1,0 +1,295 @@
+type AFInquiryModel struct {
+	InquiryID        string    `json:"inquiry_id" db:"inquiry_id"`
+	IncidentID       string    `json:"incident_id" db:"incident_id"`
+	SenderBin        string    `json:"sender_bin" db:"sender_bin"`
+	SenderEmail      string    `json:"sender_email" db:"sender_email"`
+	IsUnread         bool      `json:"is_unread" db:"is_unread"`
+	ReceiverBin      string    `json:"receiver_bin" db:"receiver_bin"`
+	CreatedDate      time.Time `json:"created_date" db:"created_date"`
+	Description      string    `json:"description" db:"description"`
+	Attachments      string    `json:"attachments" db:"attachments"` // Считаем как JSON-строку
+	BatchCreatedDate time.Time `json:"batch_created_date" db:"batch_created_date"`
+}
+
+
+queryInquiries := `
+		SELECT 
+			inquiry_id,
+			incident_id,
+			sender_bin,
+			sender_email,
+			is_unread,
+			receiver_bin,
+			created_date,
+			description,
+			attachments::text AS attachments, -- кастуем jsonb в текст для простоты маппинга
+			batch_created_date
+		FROM inquiries
+		WHERE incident_id = $1
+		ORDER BY created_date DESC
+	`
+	var inquiries []AFInquiryModel
+	err = pg.DB().Select(&inquiries, queryInquiries, id)
+	if err != nil {
+		log.Printf("GetIncidentByID > error fetching inquiries: %s", err)
+		// Не блокируем выдачу инцидента, если запросы упали
+		incident.Inquiries = []AFInquiryModel{} 
+	} else {
+		incident.Inquiries = inquiries
+	}
+
+<template id="incident-detail-page">
+    <div class="container mattblock">
+        <div class="container-header">
+            <div class="toolbar">
+                <span class="dbs">
+                    <button class="bpb" @click="goBack()">
+                        <i class="arrow rotate-135"></i> Назад
+                    </button>
+                </span>
+                <span class="legend-field ml25r"> Детали инцидента (ID {{ incident_id }})</span>
+            </div>
+        </div>
+
+        <div class="container-wrapper">
+            <div id="information-content" class="container-content">
+                <template v-if="isLoading">
+                    <div class="loader"></div>
+                </template>
+
+                <template v-else>
+                    <template v-if="incident">
+                        <div class="form-max-width w100">
+                            <div id="incident-profile-info" class="form-col card-info">
+                                <div>
+                                    <span class="max-text-legend">Информация по инциденту: </span>
+                                    <span class="incident-type" :class="drawIncidentStatus(incident.status)">
+                                        <span class="incident-type-circle"></span>
+                                        <span class="incident-type-text">{{ incident.status }}</span>
+                                    </span>
+                                </div>
+
+                                <div>
+                                    <table class="tbl w100 zebra">
+                                        <thead>
+                                            <tr>
+                                                <th>ID Инцидента</th>
+                                                <th>Тип мошенничества</th>
+                                                <th>Основание создания</th>
+                                                <th>Автор</th>
+                                                <th>Дата создания</th>
+                                                <th>Создано</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td>{{ incident.id }}</td>
+                                                <td>{{ incident.fraud_type }}</td>
+                                                <td>{{ incident.based_on }}</td>
+                                                <td>{{ incident.source_organization }}</td>
+                                                <td>{{ toLocaleDate(incident.created_date) }}</td>
+                                                <td>{{ incident.source_author }}</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div class="inline-flex mt10">
+                                    <span><strong>Описание:</strong></span>
+                                    <span class="ml10">{{ incident.description }}</span>
+                                </div>
+
+                                <div class="inline-flex mt10">
+                                    <span><strong>Связанные организации (БИН):</strong></span>
+                                    <span class="ml10">{{ normalizeOrgans(incident.related) }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="tabs-container mt20 w100">
+                            <button class="tab-btn" 
+                                    :class="{ 'tab-active': activeTab === 'transactions' }" 
+                                    @click="activeTab = 'transactions'">
+                                📊 Транзакции ({{ incident.transactions ? incident.transactions.length : 0 }})
+                            </button>
+                            <button class="tab-btn" 
+                                    :class="{ 'tab-active': activeTab === 'inquiries' }" 
+                                    @click="activeTab = 'inquiries'">
+                                ✉️ Запросы ({{ incident.inquiries ? incident.inquiries.length : 0 }})
+                            </button>
+                        </div>
+
+                        <template v-if="activeTab === 'transactions'">
+                            <template v-if="incident.transactions && incident.transactions.length > 0">
+                                <div v-for="(transaction, idx) in incident.transactions" :key="transaction.id || idx" class="form-max-width w100 mt15">
+                                    <div class="form-col card-info">
+                                        <span class="max-text-legend">Транзакция №{{ idx + 1 }}</span>
+                                        <hr>
+                                        
+                                        <table class="flex-table w100">
+                                            <tr>
+                                                <td><strong>ID транзакции:</strong></td>
+                                                <td>{{ transaction.id }}</td>
+                                                <td><strong>RRN/BRRN операции:</strong></td>
+                                                <td>{{ transaction.transaction_rrn || "-" }}</td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Тип операции:</strong></td>
+                                                <td>{{ transaction.type || "-" }}</td>
+                                                <td><strong>Сумма операции:</strong></td>
+                                                <td><strong class="text-primary">{{ formatAmount(transaction.amount) }} {{ transaction.currency }}</strong></td>
+                                            </tr>
+                                            <tr>
+                                                <td><strong>Статус транзакции:</strong></td>
+                                                <td>{{ transaction.status || "-" }}</td>
+                                                <td><strong>Дата операции:</strong></td>
+                                                <td>{{ toLocaleDate(transaction.date) }}</td>
+                                            </tr>
+                                        </table>
+
+                                        <div class="participants-grid mt20">
+                                            
+                                            <div class="participant-box sender-bg">
+                                                <div class="participant-header">
+                                                    <strong>ОТПРАВИТЕЛЬ ({{ transaction.sender.incident_role || 'SENDER' }})</strong>
+                                                </div>
+                                                <table class="tbl-participant">
+                                                    <tr>
+                                                        <td>ФИО:</td>
+                                                        <td><strong>{{ transaction.sender.info.surname }} {{ transaction.sender.info.name }} {{ transaction.sender.info.patronymic }}</strong></td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td>ИИН/БИН:</td>
+                                                        <td>{{ transaction.sender.identical_number || "-" }}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td>Тип / Страна:</td>
+                                                        <td>{{ transaction.sender.type }} / {{ transaction.sender.country || "-" }}</td>
+                                                    </tr>
+                                                    <tr v-if="transaction.sender.card_mask && transaction.sender.card_mask.card_number">
+                                                        <td>Карта:</td>
+                                                        <td>💳 {{ transaction.sender.card_mask.card_number }} <span class="badge">{{ transaction.sender.card_mask.issuer_bin }}</span></td>
+                                                    </tr>
+                                                    <tr v-if="transaction.sender.account && transaction.sender.account.iban">
+                                                        <td>Счёт:</td>
+                                                        <td>🏦 {{ transaction.sender.account.iban }}</td>
+                                                    </tr>
+                                                    <tr v-if="transaction.sender.phone_number && transaction.sender.phone_number.number">
+                                                        <td>Телефон:</td>
+                                                        <td>📱 {{ transaction.sender.phone_number.number }}</td>
+                                                    </tr>
+                                                </table>
+                                            </div>
+
+                                            <div class="participant-box receiver-bg">
+                                                <div class="participant-header">
+                                                    <strong>ПОЛУЧАТЕЛЬ ({{ transaction.receiver.incident_role || 'RECEIVER' }})</strong>
+                                                </div>
+                                                <table class="tbl-participant">
+                                                    <tr>
+                                                        <td>ФИО:</td>
+                                                        <td><strong>{{ transaction.receiver.info.surname }} {{ transaction.receiver.info.name }} {{ transaction.receiver.info.patronymic }}</strong></td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td>ИИН/БИН:</td>
+                                                        <td>{{ transaction.receiver.identical_number || "-" }}</td>
+                                                    </tr>
+                                                    <tr>
+                                                        <td>Тип / Страна:</td>
+                                                        <td>{{ transaction.receiver.type }} / {{ transaction.receiver.country || "-" }}</td>
+                                                    </tr>
+                                                    <tr v-if="transaction.receiver.card_mask && transaction.receiver.card_mask.card_number">
+                                                        <td>Карта:</td>
+                                                        <td>💳 {{ transaction.receiver.card_mask.card_number }} <span class="badge">{{ transaction.receiver.card_mask.issuer_bin }}</span></td>
+                                                    </tr>
+                                                    <tr v-if="transaction.receiver.account && transaction.receiver.account.iban">
+                                                        <td>Счёт:</td>
+                                                        <td>🏦 {{ transaction.receiver.account.iban }}</td>
+                                                    </tr>
+                                                    <tr v-if="transaction.receiver.phone_number && transaction.receiver.phone_number.number">
+                                                        <td>Телефон:</td>
+                                                        <td>📱 {{ transaction.receiver.phone_number.number }}</td>
+                                                    </tr>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </template>
+                            <template v-else>
+                                <div class="form-max-width w100 mt15">
+                                    <div class="form-col card-info text-center">
+                                        <p class="text-muted">Транзакционные данные отсутствуют</p>
+                                    </div>
+                                </div>
+                            </template>
+                        </template>
+
+                        <template v-if="activeTab === 'inquiries'">
+                            <template v-if="incident.inquiries && incident.inquiries.length > 0">
+                                <div class="form-max-width w100 mt15">
+                                    <div class="form-col card-info">
+                                        <table class="tbl w100 zebra">
+                                            <thead>
+                                                <tr>
+                                                    <th>ID Запроса</th>
+                                                    <th>Отправитель (БИН)</th>
+                                                    <th>Email Отправителя</th>
+                                                    <th>Получатель (БИН)</th>
+                                                    <th>Дата создания</th>
+                                                    <th>Описание</th>
+                                                    <th>Статус</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr v-for="inquiry in incident.inquiries" :key="inquiry.inquiry_id">
+                                                    <td><code>{{ inquiry.inquiry_id }}</code></td>
+                                                    <td>{{ inquiry.sender_bin }}</td>
+                                                    <td>{{ inquiry.sender_email }}</td>
+                                                    <td>{{ inquiry.receiver_bin }}</td>
+                                                    <td>{{ toLocaleDate(inquiry.created_date) }}</td>
+                                                    <td>{{ inquiry.description || "-" }}</td>
+                                                    <td>
+                                                        <span :class="inquiry.is_unread ? 'badge-unread' : 'badge-read'">
+                                                            {{ inquiry.is_unread ? 'Не прочитан' : 'Прочитан' }}
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </template>
+                            <template v-else>
+                                <div class="form-max-width w100 mt15">
+                                    <div class="form-col card-info text-center">
+                                        <p class="text-muted">Запросы по данному инциденту не найдены</p>
+                                    </div>
+                                </div>
+                            </template>
+                        </template>
+
+                    </template>
+
+                    <template v-else-if="!hasError">
+                        <p>По данному инциденту отсутствует информация</p>
+                    </template>
+                    <template v-else-if="hasError">
+                        <p>Произошла ошибка при загрузке данных<br>Причина: <strong>{{ errorMessage }}</strong></p>
+                    </template>
+                </template>
+            </div>
+        </div>
+    </div>
+</template>
+
+data() {
+    return {
+        incident_id: null,
+        incident: null,
+        isLoading: false,
+        hasError: false,
+        errorMessage: '',
+        activeTab: 'transactions', // <-- Добавь это! Вкладка по умолчанию
+    }
+}
