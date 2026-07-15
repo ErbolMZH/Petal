@@ -1,0 +1,528 @@
+package model
+
+import (
+	"database/sql"
+	"errors"
+	"log"
+)
+
+// GetIncidentByID выбирает инцидент со всеми связями (Related и Transactions) из БД
+func GetIncidentByID(id string) (AFIncidentInfoModel, error) {
+	var incident AFIncidentInfoModel
+
+	// 1. Получаем основную информацию об инциденте из incidents1
+	queryIncident := `
+		SELECT 
+			id, 
+			incident_date AS idate, -- в процедуре это поле называется incident_date
+			created_date AS created_at, 
+			resolution_status AS status, -- в процедуре resolution_status, в структуре db:"status"
+			fraud_type, 
+			description, 
+			amount, 
+			currency, 
+			source_author, 
+			source_organization, 
+			based_on, 
+			is_author, 
+			restricted
+		FROM incidents1 
+		WHERE id = $1 
+		LIMIT 1
+	`
+
+	// pg.DB().Get заполнит базовые поля структуры
+	err := pg.DB().Get(&incident, queryIncident, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return incident, errors.New("incident not found")
+		}
+		return incident, err
+	}
+
+	// 2. Получаем связанные организации (Related)
+	queryRelated := `
+		SELECT organization_name 
+		FROM incident_related 
+		WHERE incident_id = $1
+	`
+	var related []string
+	err = pg.DB().Select(&related, queryRelated, id)
+	if err != nil {
+		log.Printf("GetIncidentByID > error fetching related organizations: %s", err)
+	} else {
+		incident.Related = related
+	}
+
+	// 3. Получаем список транзакций для этого инцидента
+	queryTransactions := `
+		SELECT 
+			id, 
+			date, 
+			type, 
+			status, 
+			amount, 
+			currency, 
+			transaction_rrn,
+			sender_id,
+			receiver_id
+		FROM transactions 
+		WHERE incident_id = $1 AND (is_deleted IS DISTINCT FROM TRUE)
+	`
+
+	// Временная структура для сканирования транзакций из БД (с ID отправителя и получателя)
+	type DBTransaction struct {
+		ID             string `db:"id"`
+		Date           string `db:"date"`
+		Type           string `db:"type"`
+		Status         string `db:"status"`
+		Amount         int    `db:"amount"`
+		Currency       string `db:"currency"`
+		TransactionRrn string `db:"transaction_rrn"`
+		SenderID       string `db:"sender_id"`
+		ReceiverID     string `db:"receiver_id"`
+	}
+
+	var dbTxList []DBTransaction
+	err = pg.DB().Select(&dbTxList, queryTransactions, id)
+	if err != nil {
+		log.Printf("GetIncidentByID > error fetching transactions: %s", err)
+		return incident, nil // Возвращаем инцидент хотя бы без транзакций, если они упали
+	}
+
+	if len(dbTxList) == 0 {
+		return incident, nil
+	}
+
+	// Собираем все уникальные ID участников, чтобы вытащить их данные одним запросом
+	participantIDs := make([]string, 0)
+	for _, tx := range dbTxList {
+		if tx.SenderID != "" {
+			participantIDs = append(participantIDs, tx.SenderID)
+		}
+		if tx.ReceiverID != "" {
+			participantIDs = append(participantIDs, tx.ReceiverID)
+		}
+	}
+
+	// Загружаем данные участников
+	participantsMap := make(map[string]AFParticipantModel)
+	if len(participantIDs) > 0 {
+		participantsMap, err = getParticipantsByIDs(participantIDs)
+		if err != nil {
+			log.Printf("GetIncidentByID > error fetching participants: %s", err)
+		}
+	}
+
+	// 4. Маппим данные обратно в структуру транзакций Go
+	incident.Transactions = make([]AFTransactionModel, 0, len(dbTxList))
+	for _, tx := range dbTxList {
+		apiTx := AFTransactionModel{
+			ID:             tx.ID,
+			Date:           tx.Date,
+			Type:           tx.Type,
+			Status:         tx.Status,
+			Amount:         tx.Amount,
+			Currency:       tx.Currency,
+			TransactionRrn: tx.TransactionRrn,
+		}
+
+		if sender, ok := participantsMap[tx.SenderID]; ok {
+			apiTx.Sender = sender
+		}
+		if receiver, ok := participantsMap[tx.ReceiverID]; ok {
+			apiTx.Receiver = receiver
+		}
+
+		incident.Transactions = append(incident.Transactions, apiTx)
+	}
+
+	return incident, nil
+}
+
+// Вспомогательная функция для получения участников транзакции
+func getParticipantsByIDs(ids []string) (map[string]AFParticipantModel, error) {
+	result := make(map[string]AFParticipantModel)
+
+	// sqlx.In позволяет удобно сделать запрос WHERE id IN (...)
+	query := `
+		SELECT 
+			id,
+			type,
+			incident_role,
+			identification_number AS identical_number, -- маппинг на структуру
+			country,
+			
+			-- Поля для Info (AFPartyInfoModel)
+			name,
+			surname,
+			patronymic,
+			gender,
+			origin_date,
+			
+			-- Поля для CardMask (AFCardModel)
+			card_id,
+			card_number,
+			card_issuer_bin,
+			
+			-- Поля для Account (AFIBANModel)
+			account_id,
+			account_iban,
+			account_status,
+			account_balance,
+			account_currency,
+			is_foreign_account,
+			
+			-- Поля для PhoneNumber (AFPhoneNumberModel)
+			phone_id,
+			phone_number
+		FROM transaction_participants
+		WHERE id IN (?)
+	`
+
+	query, args, err := sqlx.In(query, ids)
+	if err != nil {
+		return result, err
+	}
+	query = pg.DB().Rebind(query)
+
+	// Временная плоская структура для сканирования строки БД
+	type FlatParticipant struct {
+		ID                string         `db:"id"`
+		Type              string         `db:"type"`
+		IncidentRole      string         `db:"incident_role"`
+		IdenticalNumber   sql.NullString `db:"identical_number"`
+		Country           sql.NullString `db:"country"`
+		// Info
+		Name              sql.NullString `db:"name"`
+		Surname           sql.NullString `db:"surname"`
+		Patronymic        sql.NullString `db:"patronymic"`
+		Gender            sql.NullString `db:"gender"`
+		OriginDate        sql.NullString `db:"origin_date"`
+		// Card
+		CardID            sql.NullString `db:"card_id"`
+		CardNumber        sql.NullString `db:"card_number"`
+		CardIssuerBin     sql.NullString `db:"card_issuer_bin"`
+		// Account
+		AccountID         sql.NullString `db:"account_id"`
+		AccountIban       sql.NullString `db:"account_iban"`
+		AccountStatus     sql.NullString `db:"account_status"`
+		AccountBalance    sql.NullFloat64`db:"account_balance"`
+		AccountCurrency   sql.NullString `db:"account_currency"`
+		IsForeignAccount  sql.NullBool   `db:"is_foreign_account"`
+		// Phone
+		PhoneID           sql.NullString `db:"phone_id"`
+		PhoneNumber       sql.NullString `db:"phone_number"`
+	}
+
+	var rows []FlatParticipant
+	err = pg.DB().Select(&rows, query, args...)
+	if err != nil {
+		return result, err
+	}
+
+	// Переносим плоские данные в древовидную структуру Go моделей
+	for _, r := range rows {
+		p := AFParticipantModel{
+			ID:              r.ID,
+			Type:            r.Type,
+			IncidentRole:    r.IncidentRole,
+			IdenticalNumber: r.IdenticalNumber.String,
+			Country:         r.Country.String,
+			Info: AFPartyInfoModel{
+				Name:       r.Name.String,
+				Surname:    r.Surname.String,
+				Patronymic: r.Patronymic.String,
+				Gender:     r.Gender.String,
+				OriginDate: r.OriginDate.String,
+			},
+		}
+
+		if r.CardID.Valid && r.CardID.String != "" {
+			p.CardMask = AFCardModel{
+				ID:         r.CardID.String,
+				CardNumber: r.CardNumber.String,
+				IssuerBin:  r.CardIssuerBin.String,
+			}
+		}
+
+		if r.AccountID.Valid && r.AccountID.String != "" {
+			p.Account = AFIBANModel{
+				ID:               r.AccountID.String,
+				Iban:             r.AccountIban.String,
+				AccountStatus:    r.AccountStatus.String,
+				AccountBalance:   decimal.NewFromFloat(r.AccountBalance.Float64), // предполагая использование decimal.Decimal
+				AccountCurrency:  r.AccountCurrency.String,
+				IsForeignAccount: r.IsForeignAccount.Bool,
+			}
+		}
+
+		if r.PhoneID.Valid && r.PhoneID.String != "" {
+			p.PhoneNumber = AFPhoneNumberModel{
+				ID:     r.PhoneID.String,
+				Number: r.PhoneNumber.String,
+			}
+		}
+
+		result[r.ID] = p
+	}
+
+	return result, nil
+}
+
+package model
+
+import "github.com/shopspring/decimal"
+
+// AFPartyInfoModel содержит персональные данные физлица/орг
+type AFPartyInfoModel struct {
+	Name       string `json:"name" db:"name"`
+	Surname    string `json:"surname" db:"surname"`
+	Patronymic string `json:"patronymic" db:"patronymic"`
+	Gender     string `json:"gender" db:"gender"`
+	OriginDate string `json:"origin_date" db:"origin_date"`
+}
+
+// AFCardModel содержит маскированные данные карты
+type AFCardModel struct {
+	ID         string `json:"id,omitempty" db:"card_id"`
+	CardNumber string `json:"card_number" db:"card_number"`
+	IssuerBin  string `json:"issuer_bin" db:"card_issuer_bin"`
+}
+
+// AFIBANModel содержит банковские реквизиты счета
+type AFIBANModel struct {
+	ID               string          `json:"id,omitempty" db:"account_id"`
+	Iban             string          `json:"iban" db:"account_iban"`
+	AccountStatus    string          `json:"account_status" db:"account_status"`
+	AccountBalance   decimal.Decimal `json:"account_balance" db:"account_balance"`
+	AccountCurrency  string          `json:"account_currency" db:"account_currency"`
+	IsForeignAccount bool            `json:"is_foreign_account" db:"is_foreign_account"`
+}
+
+// AFPhoneNumberModel содержит контактный номер телефона
+type AFPhoneNumberModel struct {
+	ID     string `json:"id,omitempty" db:"phone_id"`
+	Number string `json:"number" db:"phone_number"`
+}
+
+// Дополнительные структуры, зарезервированные в вашей модели
+type AFEmailModel struct {
+	ID    string `json:"id,omitempty" db:"email_id"`
+	Email string `json:"email" db:"email"`
+}
+
+type AFDeviceModel struct {
+	ID       string `json:"id,omitempty" db:"device_id"`
+	DeviceIP string `json:"device_ip" db:"device_ip"`
+}
+
+// AFParticipantModel агрегирует всю информацию об участнике
+type AFParticipantModel struct {
+	ID              string             `json:"id,omitempty" db:"id"`
+	Type            string             `json:"type" db:"type"`
+	IncidentRole    string             `json:"incident_role" db:"incident_role"`
+	Info            AFPartyInfoModel   `json:"info"`
+	IdenticalNumber string             `json:"identical_number,omitempty" db:"identical_number"`
+	Country         string             `json:"country,omitempty" db:"country"`
+	CardMask        AFCardModel        `json:"card_mask,omitempty"`
+	Account         AFIBANModel        `json:"account,omitempty"`
+	PhoneNumber     AFPhoneNumberModel `json:"phone_number,omitempty"`
+	Email           AFEmailModel       `json:"email,omitempty"`
+	Device          AFDeviceModel      `json:"device,omitempty"`
+}
+
+
+<template id="incident-detail-page">
+    <div class="container mattblock">
+        <div class="container-header">
+            <div class="toolbar">
+                <span class="dbs">
+                    <button class="bpb" @click="goBack()">
+                        <i class="arrow rotate-135"></i> Назад
+                    </button>
+                </span>
+                <span class="legend-field ml25r"> Детали инцидента (ID {{ incident_id }})</span>
+            </div>
+        </div>
+
+        <div class="container-wrapper">
+            <div id="information-content" class="container-content">
+                <template v-if="isLoading">
+                    <div class="loader"></div>
+                </template>
+
+                <template v-else>
+                    <template v-if="incident">
+                        <div class="form-max-width w100">
+                            <div id="incident-profile-info" class="form-col card-info">
+                                <div>
+                                    <span class="max-text-legend">Информация по инциденту: </span>
+                                    <span class="incident-type" :class="drawIncidentStatus(incident.status)">
+                                        <span class="incident-type-circle"></span>
+                                        <span class="incident-type-text">{{ incident.status }}</span>
+                                    </span>
+                                </div>
+
+                                <div>
+                                    <table class="tbl w100 zebra">
+                                        <thead>
+                                            <tr>
+                                                <th>ID Инцидента</th>
+                                                <th>Тип мошенничества</th>
+                                                <th>Основание создания</th>
+                                                <th>Автор</th>
+                                                <th>Дата создания</th>
+                                                <th>Создано</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <tr>
+                                                <td>{{ incident.id }}</td>
+                                                <td>{{ incident.fraud_type }}</td>
+                                                <td>{{ incident.based_on }}</td>
+                                                <td>{{ incident.source_organization }}</td>
+                                                <td>{{ toLocaleDate(incident.created_date) }}</td>
+                                                <td>{{ incident.source_author }}</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div class="inline-flex mt10">
+                                    <span><strong>Описание:</strong></span>
+                                    <span class="ml10">{{ incident.description }}</span>
+                                </div>
+
+                                <div class="inline-flex mt10">
+                                    <span><strong>Связанные организации (БИН):</strong></span>
+                                    <span class="ml10">{{ normalizeOrgans(incident.related) }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <template v-if="incident.transactions && incident.transactions.length > 0">
+                            <div v-for="(transaction, idx) in incident.transactions" :key="transaction.id || idx" class="form-max-width w100 mt20">
+                                <div class="form-col card-info">
+                                    <span class="max-text-legend">Транзакция №{{ idx + 1 }}</span>
+                                    <hr>
+                                    
+                                    <table class="flex-table w100">
+                                        <tr>
+                                            <td><strong>ID транзакции:</strong></td>
+                                            <td>{{ transaction.id }}</td>
+                                            <td><strong>RRN/BRRN операции:</strong></td>
+                                            <td>{{ transaction.transaction_rrn || "-" }}</td>
+                                        </tr>
+                                        <tr>
+                                            <td><strong>Тип операции:</strong></td>
+                                            <td>{{ transaction.type || "-" }}</td>
+                                            <td><strong>Сумма операции:</strong></td>
+                                            <td><strong class="text-primary">{{ formatAmount(transaction.amount) }} {{ transaction.currency }}</strong></td>
+                                        </tr>
+                                        <tr>
+                                            <td><strong>Статус транзакции:</strong></td>
+                                            <td>{{ transaction.status || "-" }}</td>
+                                            <td><strong>Дата операции:</strong></td>
+                                            <td>{{ toLocaleDate(transaction.date) }}</td>
+                                        </tr>
+                                    </table>
+
+                                    <div class="participants-grid mt20">
+                                        
+                                        <div class="participant-box sender-bg">
+                                            <div class="participant-header">
+                                                <strong>ОТПРАВИТЕЛЬ ({{ transaction.sender.incident_role || 'SENDER' }})</strong>
+                                            </div>
+                                            <table class="tbl-participant">
+                                                <tr>
+                                                    <td>ФИО:</td>
+                                                    <td><strong>{{ transaction.sender.info.surname }} {{ transaction.sender.info.name }} {{ transaction.sender.info.patronymic }}</strong></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>ИИН/БИН:</td>
+                                                    <td>{{ transaction.sender.identical_number || "-" }}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Тип / Страна:</td>
+                                                    <td>{{ transaction.sender.type }} / {{ transaction.sender.country || "-" }}</td>
+                                                </tr>
+                                                <tr v-if="transaction.sender.card_mask && transaction.sender.card_mask.card_number">
+                                                    <td>Карта / BIN:</td>
+                                                    <td>💳 {{ transaction.sender.card_mask.card_number }} <span class="badge">{{ transaction.sender.card_mask.issuer_bin }}</span></td>
+                                                </tr>
+                                                <tr v-if="transaction.sender.account && transaction.sender.account.iban">
+                                                    <td>Счёт (IBAN):</td>
+                                                    <td>🏦 {{ transaction.sender.account.iban }} 
+                                                        <span class="sub-info">(Статус: {{ transaction.sender.account.account_status || 'N/A' }})</span>
+                                                    </td>
+                                                </tr>
+                                                <tr v-if="transaction.sender.phone_number && transaction.sender.phone_number.number">
+                                                    <td>Телефон:</td>
+                                                    <td>📱 {{ transaction.sender.phone_number.number }}</td>
+                                                </tr>
+                                            </table>
+                                        </div>
+
+                                        <div class="participant-box receiver-bg">
+                                            <div class="participant-header">
+                                                <strong>ПОЛУЧАТЕЛЬ ({{ transaction.receiver.incident_role || 'RECEIVER' }})</strong>
+                                            </div>
+                                            <table class="tbl-participant">
+                                                <tr>
+                                                    <td>ФИО:</td>
+                                                    <td><strong>{{ transaction.receiver.info.surname }} {{ transaction.receiver.info.name }} {{ transaction.receiver.info.patronymic }}</strong></td>
+                                                </tr>
+                                                <tr>
+                                                    <td>ИИН/БИН:</td>
+                                                    <td>{{ transaction.receiver.identical_number || "-" }}</td>
+                                                </tr>
+                                                <tr>
+                                                    <td>Тип / Страна:</td>
+                                                    <td>{{ transaction.receiver.type }} / {{ transaction.receiver.country || "-" }}</td>
+                                                </tr>
+                                                <tr v-if="transaction.receiver.card_mask && transaction.receiver.card_mask.card_number">
+                                                    <td>Карта / BIN:</td>
+                                                    <td>💳 {{ transaction.receiver.card_mask.card_number }} <span class="badge">{{ transaction.receiver.card_mask.issuer_bin }}</span></td>
+                                                </tr>
+                                                <tr v-if="transaction.receiver.account && transaction.receiver.account.iban">
+                                                    <td>Счёт (IBAN):</td>
+                                                    <td>🏦 {{ transaction.receiver.account.iban }}
+                                                        <span class="sub-info">(Баланс: {{ formatAmount(transaction.receiver.account.account_balance) }} {{ transaction.receiver.account.account_currency }})</span>
+                                                    </td>
+                                                </tr>
+                                                <tr v-if="transaction.receiver.phone_number && transaction.receiver.phone_number.number">
+                                                    <td>Телефон:</td>
+                                                    <td>📱 {{ transaction.receiver.phone_number.number }}</td>
+                                                </tr>
+                                            </table>
+                                        </div>
+
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                        <template v-else>
+                            <div class="form-max-width w100 mt20">
+                                <div class="form-col card-info text-center">
+                                    <p class="text-muted">Транзакционные данные по данному инциденту отсутствуют</p>
+                                </div>
+                            </div>
+                        </template>
+
+                    </template>
+
+                    <template v-else-if="!hasError">
+                        <p>По данному инциденту отсутствует информация</p>
+                    </template>
+                    <template v-else-if="hasError">
+                        <p>Произошла ошибка при загрузке данных<br>Причина: <strong>{{ errorMessage }}</strong></p>
+                    </template>
+                    <template v-else>
+                        <p>Произошла неизвестная ошибка!!!</p>
+                    </template>
+                </template>
+            </div>
+        </div>
+    </div>
+</template>
