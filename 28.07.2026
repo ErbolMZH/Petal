@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -14,14 +17,41 @@ import (
 	"your_project/pg"
 )
 
-// Структура для отправки Inquiry (подправьте поля под требования вашего external/v1 API)
+// Структура тела запроса (Payload) на создание Inquiry
 type CreateInquiryRequest struct {
 	Type           string                 `json:"type,omitempty"`
 	Subject        string                 `json:"subject,omitempty"`
 	AdditionalData map[string]interface{} `json:"additionalData,omitempty"`
 }
 
-// Сохранение ответа POST-запроса в БД
+// Функция для отправки POST-запроса с гарантированным Content-Type: application/json
+func sendPostInquiry(url string, jsonPayload []byte, token string) ([]byte, int, error) {
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonPayload))
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Заголовки (Критично для исправления ошибки 415)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	return body, resp.StatusCode, nil
+}
+
+// Сохранение сырого ответа в базу данных PostgreSQL
 func SaveCreateInquiryRawTarget(body []byte, status int, incidentID string) error {
 	q := `INSERT INTO inquiries_json(json_, status, incident_id) VALUES($1, $2, $3);`
 	_, err := pg.DB().Exec(q, body, status, incidentID)
@@ -30,7 +60,6 @@ func SaveCreateInquiryRawTarget(body []byte, status int, incidentID string) erro
 		return fmt.Errorf("failed to insert raw inquiries POST response JSON: %w", err)
 	}
 
-	// Вызов процедуры обработки (если требуется после создания)
 	callProceduryQuery := `CALL public.p_prc_inquiries_json();`
 	_, err = pg.DB().Exec(callProceduryQuery)
 	if err != nil {
@@ -57,7 +86,7 @@ func main() {
 	comps.LoadConfiguration("../config.json")
 
 	// ----------------------------------------------------------------------------------------->
-	// 1. Авторизация и проверка токена
+	// 1. Проверка и обновление токена авторизации
 	authData, _ := model.AFGetAuthStruct()
 
 	secAfterTokenCreation := int(time.Since(authData.CreatedAt).Seconds())
@@ -72,7 +101,7 @@ func main() {
 	model.AFGlobalAuthData = authData
 
 	// ----------------------------------------------------------------------------------------->
-	// 2. Формирование тела POST-запроса (Payload)
+	// 2. Формирование структуры JSON для POST запроса
 	reqPayload := CreateInquiryRequest{
 		Type:    *inqType,
 		Subject: "Запрос информации по инциденту",
@@ -88,14 +117,13 @@ func main() {
 	}
 
 	// ----------------------------------------------------------------------------------------->
-	// 3. Отправка POST запроса через ваш model.AFRequestPlain
-	// Внимание: проверьте сигнатуру AFRequestPlain. Если она принимает string/[]byte как body payload,
-	// передаем `string(jsonPayload)`.
-	url := comps.Config.AF.APIURL + `/external/v1/incidents/` + *in_id + `/inquiries`
-	
-	body, status, err := model.AFRequestPlain("POST", url, string(jsonPayload), authData.Access)
+	// 3. Отправка POST запроса
+	targetURL := comps.Config.AF.APIURL + `/external/v1/incidents/` + *in_id + `/inquiries`
+
+	log.Println("Шаг 1: Отправка POST запроса на", targetURL)
+	body, status, err := sendPostInquiry(targetURL, jsonPayload, authData.Access)
 	if err != nil {
-		logger.Log("ERROR", "create_inquiry.go", "null", fmt.Sprintf("create_inquiry.go > AFRequestPlain POST inquiry fiasco: %s", err), err)
+		logger.Log("ERROR", "create_inquiry.go", "null", fmt.Sprintf("create_inquiry.go > sendPostInquiry fiasco: %s", err), err)
 		os.Exit(1)
 	}
 
@@ -105,19 +133,20 @@ func main() {
 	}
 
 	// ----------------------------------------------------------------------------------------->
-	// 4. Обработка и сохранение результата
+	// 4. Обработка ответа и сохранение в PostgreSQL
 	if status >= 200 && status < 300 {
-		log.Println("Шаг 1 POST запрос успешен. Начинаем SaveCreateInquiryRawTarget... ")
+		log.Println("Шаг 2: POST запрос успешен (status =", status, "). Начинаем SaveCreateInquiryRawTarget...")
 
 		if len(body) > 0 {
 			errRaw := SaveCreateInquiryRawTarget(body, status, *in_id)
 			if errRaw != nil {
 				logger.Log("ERROR", "create_inquiry.go", "", fmt.Sprintf("SaveCreateInquiryRawTarget fiasco:%s", errRaw), errRaw)
 			}
-			log.Println("[DEBUG] STEP 1: Successfully saved response!")
+			log.Println("[DEBUG] STEP 2: Successfully saved response to DB!")
 		}
 	} else {
 		logger.Log("ERROR", "create_inquiry.go", "STATUS", fmt.Sprintf("failed to create inquiry, status = %d, response = %s", status, string(body)), nil)
+		log.Printf("[ERROR] Status = %d, Response = %s\n", status, string(body))
 	}
 
 	log.Println("Work is ended")
