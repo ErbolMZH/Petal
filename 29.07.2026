@@ -1,0 +1,93 @@
+<template v-if="activeTab === 'inquiries'">
+    <!-- Шапка вкладки с кнопкой добавления -->
+    <div class="form-max-width w100 mt15 flex-between align-center">
+        <h3>Список запросов</h3>
+        <button class="btn btn-primary" @click="openInquiryModal">
+            ➕ Добавить запрос
+        </button>
+    </div>
+
+    <!-- Таблица запросов -->
+    <template v-if="incident.inquiries && incident.inquiries.length > 0">
+        <div class="form-max-width w100 mt10">
+            <div class="form-col card-info">
+                <table class="tbl w100 zebra">
+                    <thead>
+                        <tr>
+                            <th>ID Запроса</th>
+                            <th>Отправитель (БИН)</th>
+                            <th>Email Отправителя</th>
+                            <th>Получатель (БИН)</th>
+                            <th>Дата создания</th>
+                            <th>Описание</th>
+                            <th>Статус</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="inquiry in incident.inquiries" :key="inquiry.inquiry_id">
+                            <td><code>{{ inquiry.inquiry_id }}</code></td>
+                            <td>{{ inquiry.sender_bin }}</td>
+                            <td>{{ inquiry.sender_email }}</td>
+                            <td>{{ inquiry.receiver_bin }}</td>
+                            <td>{{ toLocaleDate(inquiry.created_date) }}</td>
+                            <td>{{ inquiry.description || "-" }}</td>
+                            <td>
+                                <span :class="inquiry.is_unread ? 'badge-unread' : 'badge-read'">
+                                    {{ inquiry.is_unread ? 'Не прочитан' : 'Прочитан' }}
+                                </span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </template>
+    
+    <template v-else>
+        <div class="form-max-width w100 mt10">
+            <div class="form-col card-info text-center">
+                <p class="text-muted">Запросы по данному инциденту не найдены</p>
+            </div>
+        </div>
+    </template>
+
+    <!-- Модальное окно создания запроса -->
+    <div v-if="showInquiryModal" class="modal-backdrop">
+        <div class="modal-window">
+            <div class="modal-header">
+                <h3>Создание нового запроса</h3>
+                <button class="close-btn" @click="closeInquiryModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label><strong>Тип запроса:</strong></label>
+                    <select v-model="newInquiry.type" class="form-control">
+                        <option value="MANUAL">Ручной запрос (MANUAL)</option>
+                        <option value="AUTOMATIC">Автоматический (AUTOMATIC)</option>
+                    </select>
+                </div>
+                <div class="form-group mt10">
+                    <label><strong>Описание запроса:</strong></label>
+                    <textarea 
+                        v-model="newInquiry.description" 
+                        rows="4" 
+                        class="form-control" 
+                        placeholder="Введите детальное описание запроса...">
+                    </textarea>
+                </div>
+                <div v-if="inquiryError" class="error-message mt10">
+                    {{ inquiryError }}
+                </div>
+            </div>
+            <div class="modal-footer mt15 text-right">
+                <button class="btn btn-secondary mr10" @click="closeInquiryModal" :disabled="isSubmittingInquiry">
+                    Отмена
+                </button>
+                <button class="btn btn-primary" @click="submitInquiry" :disabled="isSubmittingInquiry">
+                    <span v-if="isSubmittingInquiry">Отправка...</span>
+                    <span v-else>Отправить запрос</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</template>
