@@ -1,0 +1,80 @@
+// В секцию data() вашего Vue-компонента добавляем:
+data() {
+    return {
+        // ... ваши существующие переменные (incident, activeTab, isLoading и т.д.)
+        showInquiryModal: false,
+        isSubmittingInquiry: false,
+        inquiryError: null,
+        newInquiry: {
+            type: 'MANUAL',
+            description: ''
+        }
+    };
+},
+
+// В секцию methods добавляем:
+methods: {
+    // ... ваши существующие методы (toLocaleDate, normalizeOrgans и т.д.)
+
+    // Открытие модалки
+    openInquiryModal() {
+        this.newInquiry.type = 'MANUAL';
+        this.newInquiry.description = '';
+        this.inquiryError = null;
+        this.showInquiryModal = true;
+    },
+
+    // Закрытие модалки
+    closeInquiryModal() {
+        if (!this.isSubmittingInquiry) {
+            this.showInquiryModal = false;
+        }
+    },
+
+    // Отправка POST-запроса на бэкенд
+    async submitInquiry() {
+        if (!this.newInquiry.description.trim()) {
+            this.inquiryError = 'Пожалуйста, заполните описание запроса.';
+            return;
+        }
+
+        this.isSubmittingInquiry = true;
+        this.inquiryError = null;
+
+        try {
+            // Эндпоинт отправки запроса
+            const response = await fetch(`/api/incidents/${this.incident.id}/inquiries`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    type: this.newInquiry.type,
+                    description: this.newInquiry.description
+                })
+            });
+
+            if (!response.ok) {
+                const errData = await response.json().catch(() => ({}));
+                throw new Error(errData.message || `Ошибка сервера: ${response.status}`);
+            }
+
+            // Успешная отправка
+            this.closeInquiryModal();
+            
+            // Перезагружаем данные инцидента/запросов, если есть функция загрузки
+            if (typeof this.loadIncidentData === 'function') {
+                await this.loadIncidentData(this.incident.id);
+            } else {
+                // Если метода нет, перезагружаем страницу
+                window.location.reload();
+            }
+
+        } catch (err) {
+            console.error('Submit inquiry error:', err);
+            this.inquiryError = err.message || 'Произошла ошибка при отправке запроса';
+        } finally {
+            this.isSubmittingInquiry = false;
+        }
+    }
+}
