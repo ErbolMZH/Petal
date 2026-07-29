@@ -1,0 +1,84 @@
+// CreateInquiryHandler — HTTP хэндлер для Echo
+func CreateInquiryHandler(c echo.Context) error {
+	// 1. Получаем incident_id из параметров URL (например: POST /incidents/:id/inquiries)
+	incidentID := c.Param("id")
+	if incidentID == "" {
+		logger.Log("WARN", "inquiry_handler", "NULL", "Incident ID is empty", nil)
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Incident ID is required"})
+	}
+
+	// 2. Парсим тело JSON-запроса (Type и Description)
+	var input CreateInquiryInput
+	if err := c.Bind(&input); err != nil {
+		logger.Log("WARN", "inquiry_handler", incidentID, "Invalid JSON input", err)
+		return c.JSON(http.StatusBadRequest, echo.Map{"error": "Invalid request payload"})
+	}
+
+	if input.Type == "" {
+		input.Type = "MANUAL"
+	}
+
+	// 3. Проверка и обновление авторизационного токена
+	authData, _ := model.AFGetAuthStruct()
+	secAfterTokenCreation := int(time.Since(authData.CreatedAt).Seconds())
+	if secAfterTokenCreation >= authData.RefreshExpiresIn {
+		var err error
+		authData, _, err = model.AFAuth(`create_inquiry token expired`)
+		if err != nil {
+			logger.Log("ERROR", "inquiry_handler", incidentID, fmt.Sprintf("AFAuth fiasco: %s", err), err)
+			return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Authentication failed"})
+		}
+	}
+	model.AFGlobalAuthData = authData
+
+	// 4. Формирование структуры JSON для внешнего POST-запроса
+	reqPayload := ExternalInquiryPayload{
+		Type:    input.Type,
+		Subject: "Запрос информации по инциденту",
+		AdditionalData: map[string]interface{}{
+			"description": input.Description,
+		},
+	}
+
+	jsonPayload, err := json.Marshal(reqPayload)
+	if err != nil {
+		logger.Log("ERROR", "inquiry_handler", incidentID, fmt.Sprintf("failed to marshal request payload: %s", err), err)
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to prepare request payload"})
+	}
+
+	// 5. Отправка POST-запроса во внешний API
+	targetURL := comps.Config.AF.APIURL + `/external/v1/incidents/` + incidentID + `/inquiries`
+	body, status, err := sendPostInquiry(targetURL, jsonPayload, authData.Access)
+	if err != nil {
+		logger.Log("ERROR", "inquiry_handler", incidentID, fmt.Sprintf("sendPostInquiry fiasco: %s", err), err)
+		return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to connect to external service"})
+	}
+
+	if status == http.StatusUnauthorized {
+		logger.Log("ERROR", "inquiry_handler", incidentID, "Status 401 unauthorized", nil)
+		return c.JSON(http.StatusUnauthorized, echo.Map{"error": "Unauthorized in external service"})
+	}
+
+	// 6. Сохранение в БД и обработка результата
+	if status >= 200 && status < 300 {
+		if len(body) > 0 {
+			errRaw := SaveCreateInquiryRawTarget(body, status, incidentID)
+			if errRaw != nil {
+				logger.Log("ERROR", "inquiry_handler", incidentID, fmt.Sprintf("SaveCreateInquiryRawTarget fiasco: %s", errRaw), errRaw)
+				return c.JSON(http.StatusInternalServerError, echo.Map{"error": "Failed to save inquiry data"})
+			}
+		}
+		return c.JSON(http.StatusOK, echo.Map{
+			"message": "Inquiry created successfully",
+			"status":  status,
+		})
+	}
+
+	// Если внешний сервис вернул статус с ошибкой (4xx / 5xx)
+	logger.Log("ERROR", "inquiry_handler", incidentID, fmt.Sprintf("Failed to create inquiry, status = %d, response = %s", status, string(body)), nil)
+	return c.JSON(status, echo.Map{
+		"error":    "External service error",
+		"status":   status,
+		"details":  string(body),
+	})
+}
